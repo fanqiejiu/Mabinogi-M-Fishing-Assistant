@@ -26,7 +26,8 @@ class FishingEngineTests(unittest.TestCase):
     def test_icon_states_keep_rod_warning_and_fish_separate(self) -> None:
         config = AppConfig()
         self.assertEqual(
-            FishingEngine.classify_icon_state(766, config).value, "normal"
+            FishingEngine.classify_icon_state(766, config),
+            IconState.READY_TO_CAST,
         )
         self.assertEqual(
             FishingEngine.classify_icon_state(365, config).value, "idle_recovery"
@@ -34,6 +35,105 @@ class FishingEngineTests(unittest.TestCase):
         self.assertEqual(
             FishingEngine.classify_icon_state(1985, config).value, "fish_hooked"
         )
+
+    def test_rod_color_signature_recovers_when_red_count_is_low(self) -> None:
+        hsv = np.zeros((180, 160, 3), dtype=np.uint8)
+        hsv[:, :] = (60, 170, 220)
+        hsv[105:155, 20:140] = (105, 220, 220)
+        hsv[35:118, 92:104] = (20, 180, 160)
+
+        state, signals = FishingEngine.classify_frame_state(
+            cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR), AppConfig()
+        )
+
+        self.assertLess(signals.red_pixels, AppConfig().idle_red_pixel_min)
+        self.assertEqual(state, IconState.READY_TO_CAST)
+
+    def test_waiting_bite_icon_is_not_ready_to_cast(self) -> None:
+        hsv = np.zeros((168, 151, 3), dtype=np.uint8)
+        hsv[:, :] = (60, 170, 220)
+        hsv[52:108, 45:101] = (0, 0, 245)
+
+        state, _signals = FishingEngine.classify_frame_state(
+            cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR), AppConfig()
+        )
+
+        self.assertEqual(state, IconState.WAITING_BITE)
+
+    def test_f8_start_arms_cast_and_ready_icon_casts_once(self) -> None:
+        config = AppConfig(
+            button_center=(1700, 900),
+            catch_strategy="instant",
+            recast_delay_ms=10000,
+        )
+        engine = FishingEngine()
+        engine._config = config  # type: ignore[attr-defined]
+        with patch.object(engine, "_prepare_stamina_view"), patch(
+            "fishing_assistant.engine.pyautogui.press"
+        ) as press:
+            self.assertTrue(engine.set_monitoring(True))
+            self.assertIsNotNone(engine._pending_recast_at)  # type: ignore[attr-defined]
+            engine._process_frame(766, config, IconState.READY_TO_CAST)
+            engine._process_frame(0, config, IconState.WAITING_BITE)
+        engine._enabled.clear()  # type: ignore[attr-defined]
+
+        press.assert_called_once_with("space")
+        self.assertIsNone(engine._pending_recast_at)  # type: ignore[attr-defined]
+
+    def test_startup_idle_recovery_casts_on_rod_without_second_ws(self) -> None:
+        config = AppConfig(
+            button_center=(1700, 900),
+            catch_strategy="instant",
+            recovery_consecutive_frames=1,
+            recovery_cooldown_ms=0,
+            recovery_pause_ms=0,
+        )
+        engine = FishingEngine()
+        engine._config = config  # type: ignore[attr-defined]
+
+        with patch.object(engine, "_prepare_stamina_view"), patch.object(
+            engine, "_tap_key"
+        ) as tap_key, patch(
+            "fishing_assistant.engine.pyautogui.press"
+        ) as press:
+            engine.set_monitoring(True)
+            engine._process_frame(365, config, IconState.IDLE_RECOVERY)
+            engine._process_frame(766, config, IconState.READY_TO_CAST)
+            engine._process_frame(365, config, IconState.IDLE_RECOVERY)
+
+        engine._enabled.clear()  # type: ignore[attr-defined]
+        self.assertEqual(
+            [call.args[0] for call in tap_key.call_args_list],
+            ["w", "s"],
+        )
+        press.assert_called_once_with("space")
+
+    def test_pending_recast_never_presses_waiting_bite_icon(self) -> None:
+        config = AppConfig(press_cooldown_ms=0)
+        engine = FishingEngine()
+        engine._pending_recast_at = 0.0  # type: ignore[attr-defined]
+        engine._pending_recast_reason = "测试"  # type: ignore[attr-defined]
+
+        with patch("fishing_assistant.engine.pyautogui.press") as press:
+            engine._process_frame(0, config, IconState.WAITING_BITE)
+
+        press.assert_not_called()
+        self.assertIsNotNone(engine._pending_recast_at)  # type: ignore[attr-defined]
+
+    def test_recent_space_blocks_ws_during_icon_transition(self) -> None:
+        config = AppConfig(
+            recovery_consecutive_frames=1,
+            recovery_cooldown_ms=0,
+        )
+        engine = FishingEngine()
+        engine._last_press_at = 99.0  # type: ignore[attr-defined]
+
+        with patch("fishing_assistant.engine.time.monotonic", return_value=100.0), patch.object(
+            engine, "_tap_key"
+        ) as tap_key:
+            engine._process_frame(365, config, IconState.IDLE_RECOVERY)
+
+        tap_key.assert_not_called()
 
     def test_horse_icons_override_fishing_states(self) -> None:
         def horse_frame(with_dismount_arrow: bool) -> np.ndarray:
@@ -75,7 +175,7 @@ class FishingEngineTests(unittest.TestCase):
         with patch("fishing_assistant.engine.pyautogui.press") as press:
             engine._process_frame(1985, config)
             engine._process_frame(1985, config)
-            engine._process_frame(0, config)
+            engine._process_frame(766, config, IconState.READY_TO_CAST)
         self.assertEqual(press.call_args_list[0].args, ("space",))
         self.assertEqual(press.call_args_list[1].args, ("space",))
 
@@ -292,6 +392,24 @@ class FishingEngineTests(unittest.TestCase):
             engine._prepare_stamina_view(config)
         activate.assert_called_once_with(target.handle)
         scroll.assert_called_once_with(5)
+    def test_f7_recalibration_while_running_rearms_cast(self) -> None:
+        config = AppConfig(button_center=(1700, 900))
+        engine = FishingEngine()
+        engine._config = config  # type: ignore[attr-defined]
+        engine._enabled.set()  # type: ignore[attr-defined]
+
+        with patch(
+            "fishing_assistant.engine.pyautogui.position",
+            return_value=(1710, 920),
+        ), patch("fishing_assistant.engine.save_config"), patch.object(
+            engine, "_schedule_recast"
+        ) as schedule:
+            engine.calibrate_from_cursor()
+
+        engine._enabled.clear()  # type: ignore[attr-defined]
+        schedule.assert_called_once()
+        self.assertEqual(schedule.call_args.args[2], "重新校准完成")
+
     def test_f7_calibration_records_cursor_without_moving_it(self) -> None:
         engine = FishingEngine()
         with patch("fishing_assistant.engine.pyautogui.position", return_value=(1700, 910)), patch(
@@ -320,14 +438,14 @@ class FishingEngineTests(unittest.TestCase):
             recovery_cooldown_ms=0,
             recovery_pause_ms=0,
             press_cooldown_ms=0,
-            recast_delay_ms=0,
+            recast_delay_ms=650,
         )
         engine = FishingEngine()
         with patch.object(engine, "_tap_key") as tap_key, patch(
             "fishing_assistant.engine.pyautogui.press"
         ) as press:
-            engine._process_frame(365, config)
-            engine._process_frame(0, config)
+            engine._process_frame(365, config, IconState.IDLE_RECOVERY)
+            engine._process_frame(766, config, IconState.READY_TO_CAST)
         self.assertEqual([call.args[0] for call in tap_key.call_args_list], ["w", "s"])
         press.assert_called_once_with("space")
 

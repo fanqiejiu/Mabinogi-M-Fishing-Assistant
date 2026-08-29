@@ -34,6 +34,8 @@ class EventKind(str, Enum):
 
 class IconState(str, Enum):
     NORMAL = "normal"
+    READY_TO_CAST = "ready_to_cast"
+    WAITING_BITE = "waiting_bite"
     FISH_HOOKED = "fish_hooked"
     IDLE_RECOVERY = "idle_recovery"
     HORSE_MOUNT_PROMPT = "horse_mount_prompt"
@@ -46,6 +48,7 @@ class IconColorSignals:
     red_ratio: float
     white_ratio: float
     green_ratio: float
+    blue_ratio: float
     brown_ratio: float
 
 
@@ -81,6 +84,7 @@ class FishingEngine:
 
     ESCAPE_MESSAGE_MATCH_THRESHOLD = 0.68
     ESCAPE_MESSAGE_WATCH_SECONDS = 2.8
+    CAST_TRANSITION_GRACE_SECONDS = 1.5
     _escape_template_mask: np.ndarray | None = None
 
     def __init__(self, event_callback: EventCallback | None = None) -> None:
@@ -196,6 +200,10 @@ class FishingEngine:
             self.update_config(button_center=(x, y))
             message = f"F7 已校准钓鱼按钮中心：({x}, {y})；已直接记录，鼠标位置未移动。"
         self._reset_detection()
+        if self._enabled.is_set():
+            self._schedule_recast(
+                time.monotonic(), self.config(), "重新校准完成"
+            )
         self._emit(EventKind.SUCCESS, message)
         return x, y
     def set_monitoring(self, enabled: bool) -> bool:
@@ -225,6 +233,7 @@ class FishingEngine:
                     monitoring=True,
                 )
             self._enabled.set()
+            self._schedule_recast(time.monotonic(), config, "监测启动")
             self._emit(EventKind.INFO, self._monitoring_details(config), monitoring=True)
             if config.capture_mode == "window" and config.window_backend == "ok":
                 self._emit(EventKind.INFO, "OK WGC 正在预热首帧，首次启动会在画面到达后自动开始识别。", monitoring=True)
@@ -297,6 +306,7 @@ class FishingEngine:
         red_mask = cv2.bitwise_or(low_red, high_red)
         white_mask = cv2.inRange(hsv, np.array([0, 0, 180]), np.array([179, 55, 255]))
         green_mask = cv2.inRange(hsv, np.array([35, 55, 80]), np.array([95, 255, 255]))
+        blue_mask = cv2.inRange(hsv, np.array([88, 60, 70]), np.array([132, 255, 255]))
         brown_mask = cv2.inRange(hsv, np.array([5, 65, 60]), np.array([28, 255, 255]))
         circle_mask = cls._icon_circle_mask(*red_mask.shape)
         area = max(1, int(cv2.countNonZero(circle_mask)))
@@ -310,6 +320,7 @@ class FishingEngine:
             red_ratio=red_ratio,
             white_ratio=ratio(white_mask),
             green_ratio=ratio(green_mask),
+            blue_ratio=ratio(blue_mask),
             brown_ratio=ratio(brown_mask),
         )
 
@@ -325,6 +336,8 @@ class FishingEngine:
             return IconState.FISH_HOOKED
         if config.idle_red_pixel_min <= red_pixels <= config.idle_red_pixel_max:
             return IconState.IDLE_RECOVERY
+        if config.idle_red_pixel_max < red_pixels < config.fish_red_pixel_threshold:
+            return IconState.READY_TO_CAST
         return IconState.NORMAL
 
     @classmethod
@@ -345,7 +358,23 @@ class FishingEngine:
                 else IconState.HORSE_MOUNT_PROMPT
             )
             return state, signals
-        return cls.classify_icon_state(signals.red_pixels, config), signals
+        is_ready_rod = (
+            signals.blue_ratio >= 0.14
+            and signals.brown_ratio >= 0.015
+            and signals.red_ratio < 0.085
+        )
+        if is_ready_rod:
+            return IconState.READY_TO_CAST, signals
+
+        state = cls.classify_icon_state(signals.red_pixels, config)
+        if (
+            state == IconState.NORMAL
+            and signals.white_ratio >= 0.12
+            and signals.green_ratio >= 0.45
+            and signals.brown_ratio < 0.01
+        ):
+            state = IconState.WAITING_BITE
+        return state, signals
 
     @staticmethod
     def find_stamina_bar(bgr: np.ndarray) -> StaminaBarSample | None:
@@ -690,7 +719,9 @@ class FishingEngine:
 
         if icon_state != self._last_logged_icon_state:
             state_name = {
-                IconState.NORMAL: "等待上钩",
+                IconState.NORMAL: "未分类普通图标",
+                IconState.READY_TO_CAST: "可抛竿鱼竿图标",
+                IconState.WAITING_BITE: "等待上钩图标",
                 IconState.FISH_HOOKED: "上钩图标",
                 IconState.IDLE_RECOVERY: "原地失效图标",
                 IconState.HORSE_MOUNT_PROMPT: "骑马图标",
@@ -729,8 +760,11 @@ class FishingEngine:
         ):
             self._perform_pending_recast(now, icon_state, config)
             return
-        if self._escape_watch_until and now >= self._escape_watch_until:
-            self._finish_escape_watch(now, config)
+        if self._escape_watch_until:
+            if icon_state == IconState.READY_TO_CAST:
+                self._finish_escape_watch(now, config, ready_visible=True)
+            elif now >= self._escape_watch_until:
+                self._finish_escape_watch(now, config)
 
         if self._waiting_for_clear:
             if self._clear_frames >= config.clear_consecutive_frames:
@@ -740,6 +774,10 @@ class FishingEngine:
             if not fish_visible and self._clear_frames >= config.clear_consecutive_frames:
                 if self._catch_strategy(config) == "stamina_bounce":
                     self._start_escape_watch(now)
+                    if icon_state == IconState.READY_TO_CAST:
+                        self._finish_escape_watch(
+                            now, config, ready_visible=True
+                        )
                 else:
                     self._fish_resolution_pending = False
                     self._reset_stamina_tracking()
@@ -780,10 +818,12 @@ class FishingEngine:
 
         if (
             config.auto_recover_idle
+            and icon_state == IconState.IDLE_RECOVERY
             and self._idle_frames >= config.recovery_consecutive_frames
             and not self._waiting_for_clear
             and not self._fish_resolution_pending
             and not self._escape_watch_until
+            and now - self._last_press_at >= self.CAST_TRANSITION_GRACE_SECONDS
             and now - self._last_recovery_at >= config.recovery_cooldown_ms / 1000
         ):
             self._recover_idle_state(config)
@@ -1020,12 +1060,22 @@ class FishingEngine:
         self._schedule_recast(now, config, "已记录本次跑鱼失败")
         return True
 
-    def _finish_escape_watch(self, now: float, config: AppConfig) -> None:
+    def _finish_escape_watch(
+        self,
+        now: float,
+        config: AppConfig,
+        *,
+        ready_visible: bool = False,
+    ) -> None:
         stamina_seen = self._escape_candidate_stamina_seen
         self._escape_watch_until = 0.0
         self._escape_candidate_elapsed = 0.0
         self._escape_candidate_stamina_seen = False
-        if stamina_seen:
+        if ready_visible:
+            self._schedule_recast(
+                now, config, "可抛竿鱼竿图标已恢复"
+            )
+        elif stamina_seen:
             self._schedule_recast(
                 now, config, "未出现跑鱼文字，体力条也未完成二次半条确认，已跳过本次目标"
             )
@@ -1149,7 +1199,9 @@ class FishingEngine:
                 return f"寻找绿色体力条…计时兜底 {elapsed:.1f} / {target:.1f} 秒"
             return "正在寻找绿色活鱼体力条…"
         return {
-            IconState.NORMAL: "正在等待上钩",
+            IconState.NORMAL: "正在识别普通图标",
+            IconState.READY_TO_CAST: "检测到可抛竿鱼竿图标，准备立即续钓",
+            IconState.WAITING_BITE: "已经抛竿，正在等待上钩",
             IconState.FISH_HOOKED: "检测到上钩图标",
             IconState.IDLE_RECOVERY: "检测到原地失效状态，准备移动恢复",
             IconState.HORSE_MOUNT_PROMPT: "检测到骑马图标，已阻止自动按键",
@@ -1214,18 +1266,19 @@ class FishingEngine:
         if not config.auto_resume_fishing:
             self._emit(EventKind.INFO, f"{reason}，等待手动按 Space 再次钓鱼。")
             return
-        self._pending_recast_at = now + config.recast_delay_ms / 1000
+        self._pending_recast_at = now
         self._pending_recast_reason = reason
-        self._emit(EventKind.INFO, f"{reason}，将在图标稳定后自动按 Space 继续钓鱼。")
+        self._emit(
+            EventKind.INFO,
+            f"{reason}，正在等待可抛竿鱼竿图标；图标出现后立即按 Space。",
+        )
 
     def _perform_pending_recast(
         self, now: float, icon_state: IconState, config: AppConfig
     ) -> None:
-        if self._pending_recast_at is None or now < self._pending_recast_at:
+        if self._pending_recast_at is None:
             return
-        if icon_state != IconState.NORMAL:
-            return
-        if now - self._last_press_at < config.press_cooldown_ms / 1000:
+        if icon_state != IconState.READY_TO_CAST:
             return
         self._press_key("space", config)
         self._last_press_at = now
