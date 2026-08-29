@@ -35,6 +35,17 @@ class IconState(str, Enum):
     NORMAL = "normal"
     FISH_HOOKED = "fish_hooked"
     IDLE_RECOVERY = "idle_recovery"
+    HORSE_MOUNT_PROMPT = "horse_mount_prompt"
+    HORSE_DISMOUNT_PROMPT = "horse_dismount_prompt"
+
+
+@dataclass(frozen=True, slots=True)
+class IconColorSignals:
+    red_pixels: int
+    red_ratio: float
+    white_ratio: float
+    green_ratio: float
+    brown_ratio: float
 
 
 @dataclass(slots=True)
@@ -72,6 +83,12 @@ class FishingEngine:
         self._last_press_at = 0.0
         self._last_recovery_at = 0.0
         self._last_metric_at = 0.0
+        self._horse_mount_frames = 0
+        self._horse_dismount_frames = 0
+        self._horse_guard_state: IconState | None = None
+        self._last_horse_dismount_at = 0.0
+        self._horse_settle_until = 0.0
+        self._ok_window_backend: window_target.OkWindowBackend | None = None
 
     def set_event_callback(self, callback: EventCallback | None) -> None:
         self._event_callback = callback
@@ -94,6 +111,7 @@ class FishingEngine:
             self._listener.stop()
         if self._thread is not None:
             self._thread.join(timeout=1.5)
+        self._close_ok_window_backend()
 
     def config(self) -> AppConfig:
         with self._config_lock:
@@ -154,7 +172,7 @@ class FishingEngine:
         if enabled:
             self._enabled.set()
             message = (
-                "实验性指定窗口模式已启动；若截图或定向按键不兼容会自动暂停。"
+                "OK 指定窗口模式已启动；若截图或定向按键不兼容会自动暂停。"
                 if config.capture_mode == "window"
                 else "监测已启动，请把游戏保持在前台。"
             )
@@ -195,21 +213,10 @@ class FishingEngine:
         )
         return DEBUG_IMAGE_PATH
     @staticmethod
-    def count_fish_red_pixels(bgr: np.ndarray) -> int:
-        """只统计圆形按钮内的红橙色像素，排除附近 UI 的干扰。"""
-        hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-        low_red = cv2.inRange(
-            hsv, np.array([0, 105, 95]), np.array([15, 255, 255])
-        )
-        high_red = cv2.inRange(
-            hsv, np.array([165, 105, 95]), np.array([179, 255, 255])
-        )
-        red_mask = cv2.bitwise_or(low_red, high_red)
-
-        height, width = red_mask.shape
-        circle_mask = np.zeros((height, width), dtype=np.uint8)
+    def _icon_circle_mask(height: int, width: int) -> np.ndarray:
+        mask = np.zeros((height, width), dtype=np.uint8)
         cv2.ellipse(
-            circle_mask,
+            mask,
             (width // 2, height // 2),
             (int(width * 0.46), int(height * 0.43)),
             0,
@@ -218,7 +225,41 @@ class FishingEngine:
             255,
             -1,
         )
-        return int(cv2.countNonZero(cv2.bitwise_and(red_mask, circle_mask)))
+        return mask
+
+    @classmethod
+    def analyze_icon_colors(cls, bgr: np.ndarray) -> IconColorSignals:
+        """统计圆形按钮内的红、白、绿、棕比例，用于钓鱼和骑马图标识别。"""
+        hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+        low_red = cv2.inRange(
+            hsv, np.array([0, 105, 95]), np.array([15, 255, 255])
+        )
+        high_red = cv2.inRange(
+            hsv, np.array([165, 105, 95]), np.array([179, 255, 255])
+        )
+        red_mask = cv2.bitwise_or(low_red, high_red)
+        white_mask = cv2.inRange(hsv, np.array([0, 0, 180]), np.array([179, 55, 255]))
+        green_mask = cv2.inRange(hsv, np.array([35, 55, 80]), np.array([95, 255, 255]))
+        brown_mask = cv2.inRange(hsv, np.array([5, 65, 60]), np.array([28, 255, 255]))
+        circle_mask = cls._icon_circle_mask(*red_mask.shape)
+        area = max(1, int(cv2.countNonZero(circle_mask)))
+
+        def ratio(mask: np.ndarray) -> float:
+            return cv2.countNonZero(cv2.bitwise_and(mask, circle_mask)) / area
+
+        red_ratio = ratio(red_mask)
+        return IconColorSignals(
+            red_pixels=int(round(red_ratio * area)),
+            red_ratio=red_ratio,
+            white_ratio=ratio(white_mask),
+            green_ratio=ratio(green_mask),
+            brown_ratio=ratio(brown_mask),
+        )
+
+    @classmethod
+    def count_fish_red_pixels(cls, bgr: np.ndarray) -> int:
+        """兼容既有调用：只返回圆形按钮内的红橙色像素数。"""
+        return cls.analyze_icon_colors(bgr).red_pixels
 
     @staticmethod
     def classify_icon_state(red_pixels: int, config: AppConfig) -> IconState:
@@ -228,6 +269,26 @@ class FishingEngine:
         if config.idle_red_pixel_min <= red_pixels <= config.idle_red_pixel_max:
             return IconState.IDLE_RECOVERY
         return IconState.NORMAL
+
+    @classmethod
+    def classify_frame_state(
+        cls, bgr: np.ndarray, config: AppConfig
+    ) -> tuple[IconState, IconColorSignals]:
+        """先识别白马与马鞍组合，再沿用钓鱼红色像素状态判断。"""
+        signals = cls.analyze_icon_colors(bgr)
+        is_horse_icon = (
+            signals.white_ratio >= 0.10
+            and signals.green_ratio >= 0.38
+            and 0.01 <= signals.brown_ratio <= 0.035
+        )
+        if is_horse_icon:
+            state = (
+                IconState.HORSE_DISMOUNT_PROMPT
+                if signals.red_ratio >= 0.015
+                else IconState.HORSE_MOUNT_PROMPT
+            )
+            return state, signals
+        return cls.classify_icon_state(signals.red_pixels, config), signals
 
     def _on_key_press(
         self, key: keyboard.Key | keyboard.KeyCode | None
@@ -262,8 +323,8 @@ class FishingEngine:
                     if config.capture_mode == "screen" and screen is None:
                         screen = mss.MSS()
                     frame = self._capture_frame(screen, config)
-                    red_pixels = self.count_fish_red_pixels(frame[:, :, :3])
-                    self._process_frame(red_pixels, config)
+                    icon_state, signals = self.classify_frame_state(frame[:, :, :3], config)
+                    self._process_frame(signals.red_pixels, config, icon_state)
                 except Exception as error:  # pragma: no cover - 显示器环境差异
                     self._enabled.clear()
                     source = "目标窗口" if config.capture_mode == "window" else "屏幕识别"
@@ -280,6 +341,13 @@ class FishingEngine:
             if config.target_button_offset is None:
                 raise RuntimeError("目标窗口尚未完成按钮校准。")
             target = self._resolve_target_window(config)
+            if config.window_backend == "ok":
+                return self._get_ok_window_backend(target).capture_region(
+                    target,
+                    config.target_button_offset,
+                    config.roi_width,
+                    config.roi_height,
+                )
             return window_target.capture_window_region(
                 target.handle,
                 config.target_button_offset,
@@ -302,10 +370,33 @@ class FishingEngine:
                 target_window_title=target.title,
             )
         return target
-    def _process_frame(self, red_pixels: int, config: AppConfig) -> None:
-        icon_state = self.classify_icon_state(red_pixels, config)
+
+    def _get_ok_window_backend(
+        self, target: window_target.WindowInfo
+    ) -> window_target.OkWindowBackend:
+        if self._ok_window_backend is None or self._ok_window_backend.handle != target.handle:
+            self._close_ok_window_backend()
+            self._ok_window_backend = window_target.OkWindowBackend(target)
+        self._ok_window_backend.update(target)
+        return self._ok_window_backend
+
+    def _close_ok_window_backend(self) -> None:
+        if self._ok_window_backend is not None:
+            self._ok_window_backend.close()
+            self._ok_window_backend = None
+
+    def _process_frame(
+        self, red_pixels: int, config: AppConfig, icon_state: IconState | None = None
+    ) -> None:
+        if icon_state is None:
+            icon_state = self.classify_icon_state(red_pixels, config)
         fish_visible = icon_state == IconState.FISH_HOOKED
         now = time.monotonic()
+
+        if self._handle_horse_icon(icon_state, config, now):
+            return
+        if now < self._horse_settle_until:
+            return
 
         if fish_visible:
             self._red_frames += 1
@@ -355,6 +446,8 @@ class FishingEngine:
                 IconState.NORMAL: "正在等待上钩",
                 IconState.FISH_HOOKED: "检测到上钩图标",
                 IconState.IDLE_RECOVERY: "检测到原地失效状态，准备移动恢复",
+                IconState.HORSE_MOUNT_PROMPT: "检测到骑马图标，已阻止自动按键",
+                IconState.HORSE_DISMOUNT_PROMPT: "检测到下马图标，正在恢复钓鱼状态",
             }[icon_state]
             self._emit(
                 EventKind.METRIC,
@@ -365,6 +458,45 @@ class FishingEngine:
                 icon_state=icon_state,
             )
             self._last_metric_at = now
+
+    def _handle_horse_icon(
+        self, icon_state: IconState, config: AppConfig, now: float
+    ) -> bool:
+        """防止续钓误按 Space 上马；已经上马时只尝试一次下马。"""
+        if icon_state == IconState.HORSE_MOUNT_PROMPT:
+            self._horse_mount_frames += 1
+            self._horse_dismount_frames = 0
+            if self._horse_mount_frames < 2:
+                return True
+            self._cancel_pending_recast()
+            if self._horse_guard_state != icon_state:
+                self._emit(EventKind.WARNING, "检测到骑马图标，已阻止自动按 Space 上马。")
+            self._horse_guard_state = icon_state
+            return True
+
+        if icon_state == IconState.HORSE_DISMOUNT_PROMPT:
+            self._horse_dismount_frames += 1
+            self._horse_mount_frames = 0
+            if self._horse_dismount_frames < 2:
+                return True
+            self._cancel_pending_recast()
+            if now - self._last_horse_dismount_at >= 2.0:
+                self._press_key("space", config)
+                self._last_horse_dismount_at = now
+                self._horse_settle_until = now + 1.5
+                self._emit(EventKind.SUCCESS, "检测到下马图标，已按一次 Space 下马，等待钓鱼图标恢复。")
+            self._horse_guard_state = icon_state
+            return True
+
+        self._horse_mount_frames = 0
+        self._horse_dismount_frames = 0
+        self._horse_guard_state = None
+        return False
+
+    def _cancel_pending_recast(self) -> None:
+        self._waiting_for_clear = False
+        self._pending_recast_at = None
+        self._pending_recast_reason = ""
 
     def _schedule_recast(self, now: float, config: AppConfig, reason: str) -> None:
         if not config.auto_resume_fishing:
@@ -402,14 +534,22 @@ class FishingEngine:
     def _press_key(self, key: str, config: AppConfig) -> None:
         if config.capture_mode == "window":
             target = self._resolve_target_window(config)
-            window_target.post_key_tap(target.handle, key)
+            if config.window_backend == "ok":
+                self._get_ok_window_backend(target).tap_key(key)
+            else:
+                window_target.post_key_tap(target.handle, key, activate_message=True)
             return
         pyautogui.press(key)
 
     def _tap_key(self, key: str, hold_ms: int, config: AppConfig) -> None:
         if config.capture_mode == "window":
             target = self._resolve_target_window(config)
-            window_target.post_key_tap(target.handle, key, hold_ms)
+            if config.window_backend == "ok":
+                self._get_ok_window_backend(target).tap_key(key, hold_ms)
+            else:
+                window_target.post_key_tap(
+                    target.handle, key, hold_ms, activate_message=True
+                )
             return
         pyautogui.keyDown(key)
         try:
@@ -435,6 +575,10 @@ class FishingEngine:
         self._idle_frames = 0
         self._pending_recast_at = None
         self._pending_recast_reason = ""
+        self._horse_mount_frames = 0
+        self._horse_dismount_frames = 0
+        self._horse_guard_state = None
+        self._horse_settle_until = 0.0
 
     def _emit(
         self,

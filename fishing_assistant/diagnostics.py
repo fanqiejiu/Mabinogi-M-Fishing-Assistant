@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .constants import APP_AUTHOR, APP_DISPLAY_VERSION, APP_NAME
+from .constants import APP_DISPLAY_VERSION, APP_NAME
 from .system_profile import SystemProfile
 
 
@@ -49,7 +49,7 @@ def record_error(
         "timestamp": now.isoformat(timespec="seconds"),
         "application": APP_NAME,
         "version": APP_DISPLAY_VERSION,
-        "author": APP_AUTHOR,
+
         "context": context,
         "error": str(error),
     }
@@ -89,7 +89,7 @@ def create_support_bundle() -> Path:
         archive.writestr(
             "README.txt",
             "这是本地生成的诊断包，不会由程序自动上传。\n"
-            f"如需协助，请由用户自行发送给 {APP_AUTHOR}。\n"
+            "如需协助，请由用户自行发送给项目维护者。\n"
             "包含：错误日志与启动时读取的一次性硬件信息。\n",
         )
     return bundle_path

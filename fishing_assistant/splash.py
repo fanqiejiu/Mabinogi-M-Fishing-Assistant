@@ -33,7 +33,7 @@ def create_splash() -> QSplashScreen:
     painter.drawText(205, 142, "洛奇 M 钓鱼助手")
     painter.setPen(QColor("#80E7BF"))
     painter.setFont(QFont("Segoe UI", 14, QFont.Weight.DemiBold))
-    painter.drawText(207, 177, f"v{APP_VERSION}  ·  by {APP_AUTHOR}")
+    painter.drawText(207, 177, f"v{APP_VERSION}  ·  {APP_AUTHOR}")
     painter.setPen(QColor("#8296B0"))
     painter.setFont(QFont("Microsoft YaHei UI", 10))
     painter.drawText(207, 210, "正在准备本地识别与诊断环境…")

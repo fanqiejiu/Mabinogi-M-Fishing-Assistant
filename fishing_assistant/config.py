@@ -16,7 +16,7 @@ DEBUG_IMAGE_PATH = APP_DIR / "fishing_roi_debug.png"
 class AppConfig:
     """以后新增选项时，在此处加入字段即可自动兼容旧配置文件。"""
 
-    schema_version: int = 5
+    schema_version: int = 6
     button_center: tuple[int, int] | None = None
     monitor_index: int = 1
     display_mode: str = "borderless"
@@ -41,6 +41,8 @@ class AppConfig:
     recast_delay_ms: int = 650
     # screen：当前稳定模式；window：指定窗口后台模式（实验性）。
     capture_mode: str = "screen"
+    # ok：OK 框架的 WGC 截图 + PostMessage；printwindow：旧版兼容实现。
+    window_backend: str = "ok"
     target_window_handle: int = 0
     target_window_title: str = ""
     target_button_offset: tuple[int, int] | None = None
@@ -72,6 +74,8 @@ def load_config() -> AppConfig:
         raw["schema_version"] = 4
     if int(raw.get("schema_version", 0)) < 5:
         raw["schema_version"] = 5
+    if int(raw.get("schema_version", 0)) < 6:
+        raw["schema_version"] = 6
 
     valid_names = {field.name for field in fields(AppConfig)}
     values = {name: value for name, value in raw.items() if name in valid_names}

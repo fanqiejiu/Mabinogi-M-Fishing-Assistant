@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import ctypes
 import sys
+import threading
 import time
+from collections.abc import Iterable
 from ctypes import wintypes
 from dataclasses import dataclass
 
@@ -21,9 +23,12 @@ else:  # pragma: no cover - Windows 桌面工具
 
 WM_KEYDOWN = 0x0100
 WM_KEYUP = 0x0101
+WM_ACTIVATE = 0x0006
+WA_ACTIVE = 1
 PW_RENDERFULLCONTENT = 0x00000002
 DIB_RGB_COLORS = 0
 BI_RGB = 0
+MABINOGI_M_WINDOW_TITLE = "瑪奇 Mobile"
 
 
 class _BITMAPINFOHEADER(ctypes.Structure):
@@ -114,6 +119,144 @@ class WindowInfo:
 
     def contains(self, x: int, y: int) -> bool:
         return self.left <= x < self.right and self.top <= y < self.bottom
+
+
+class _OkWindowAdapter:
+    """满足 OK WGC/消息交互组件所需的最小窗口适配器，不引入 OK 自带 UI。"""
+
+    def __init__(self, info: WindowInfo, exit_event: threading.Event) -> None:
+        self.app_exit_event = exit_event
+        self.hwnds: list[tuple[object, ...]] = []
+        self.update(info)
+
+    def update(self, info: WindowInfo) -> None:
+        self.hwnd = info.handle
+        self.top_hwnd = info.handle
+        self.x, self.y = info.left, info.top
+        self.width, self.height = info.width, info.height
+        self.window_width, self.window_height = info.width, info.height
+        self.client_width, self.client_height = info.width, info.height
+        self.exists = True
+
+    @property
+    def capture_target_signature(self) -> tuple[int, int, int, int, int]:
+        return self.hwnd, self.width, self.height, self.x, self.y
+
+    def get_abs_cords(self, x: int, y: int) -> tuple[int, int]:
+        return self.x + x, self.y + y
+
+
+class OkWindowBackend:
+    """用 ok-script 的 WGC 与 PostMessage 组件提供指定窗口的实验性后台后端。"""
+
+    def __init__(self, info: WindowInfo) -> None:
+        self._exit_event = threading.Event()
+        self._adapter = _OkWindowAdapter(info, self._exit_event)
+        self._capture: object | None = None
+        self._interaction: object | None = None
+        self._handle = info.handle
+        self._lock = threading.RLock()
+
+    @property
+    def handle(self) -> int:
+        return self._handle
+
+    @staticmethod
+    def available() -> bool:
+        try:
+            from ok.device.capture_methods import WindowsGraphicsCaptureMethod  # noqa: F401
+            from ok.device.interaction_methods import PostMessageInteraction  # noqa: F401
+        except ImportError:
+            return False
+        return True
+
+    def update(self, info: WindowInfo) -> None:
+        if info.handle != self._handle:
+            raise RuntimeError("OK 后台会话的目标窗口已变化，请重新建立连接。")
+        with self._lock:
+            self._adapter.update(info)
+
+    def _ensure_started(self) -> None:
+        if self._capture is not None and self._interaction is not None:
+            return
+        try:
+            from ok.device.capture_methods import WindowsGraphicsCaptureMethod
+            from ok.device.interaction_methods import PostMessageInteraction
+        except ImportError as error:
+            raise RuntimeError(
+                "OK 后台组件未安装；请运行 setup.bat 重新安装环境。"
+            ) from error
+        capture = WindowsGraphicsCaptureMethod(self._adapter)
+        self._capture = capture
+        self._interaction = PostMessageInteraction(capture, self._adapter)
+
+    def capture_region(
+        self,
+        info: WindowInfo,
+        center_offset: tuple[int, int],
+        width: int,
+        height: int,
+    ) -> np.ndarray:
+        self.update(info)
+        with self._lock:
+            self._ensure_started()
+            frame = self._capture.get_frame()  # type: ignore[union-attr]
+        if frame is None:
+            raise RuntimeError("OK WGC 未收到窗口画面，请确认游戏未最小化。")
+        return _crop_backend_frame(frame, info, center_offset, width, height)
+
+    def tap_key(self, key: str, hold_ms: int = 0) -> None:
+        with self._lock:
+            self._ensure_started()
+            self._interaction.send_key(  # type: ignore[union-attr]
+                key, max(0.01, hold_ms / 1000)
+            )
+
+    def close(self) -> None:
+        self._exit_event.set()
+        with self._lock:
+            if self._capture is not None:
+                try:
+                    self._capture.close()  # type: ignore[union-attr]
+                finally:
+                    self._capture = None
+            self._interaction = None
+
+
+def _crop_backend_frame(
+    frame: np.ndarray,
+    info: WindowInfo,
+    center_offset: tuple[int, int],
+    width: int,
+    height: int,
+) -> np.ndarray:
+    """按校准时的窗口坐标裁剪 WGC 帧，并兼容 DWM 边框造成的尺寸差。"""
+    if frame.ndim != 3 or frame.shape[0] <= 0 or frame.shape[1] <= 0:
+        raise RuntimeError("OK WGC 返回了无效画面。")
+    frame_height, frame_width = frame.shape[:2]
+    scale_x = frame_width / max(1, info.width)
+    scale_y = frame_height / max(1, info.height)
+    center_x = round(center_offset[0] * scale_x)
+    center_y = round(center_offset[1] * scale_y)
+    crop_width = max(1, round(width * scale_x))
+    crop_height = max(1, round(height * scale_y))
+    left, top = center_x - crop_width // 2, center_y - crop_height // 2
+    right, bottom = left + crop_width, top + crop_height
+    if left < 0 or top < 0 or right > frame_width or bottom > frame_height:
+        raise RuntimeError("识别区域已超出 OK WGC 窗口画面，请重新校准。")
+    return frame[top:bottom, left:right].copy()
+
+
+def find_mabinogi_mobile_window(
+    windows: Iterable[WindowInfo],
+) -> WindowInfo | None:
+    """优先寻找标题为“瑪奇 Mobile”的窗口，也兼容附带后缀的标题。"""
+    candidates = list(windows)
+    expected = MABINOGI_M_WINDOW_TITLE.casefold()
+    for item in candidates:
+        if item.title.strip().casefold() == expected:
+            return item
+    return next((item for item in candidates if expected in item.title.casefold()), None)
 
 
 def _require_windows() -> None:
@@ -235,7 +378,9 @@ def _capture_window_bgra(info: WindowInfo) -> np.ndarray:
         _user32.ReleaseDC(hwnd, screen_dc)
 
 
-def post_key_tap(handle: int, key: str, hold_ms: int = 0) -> None:
+def post_key_tap(
+    handle: int, key: str, hold_ms: int = 0, *, activate_message: bool = False
+) -> None:
     """仅向目标窗口投递键盘消息，不影响当前前台应用。"""
     _require_windows()
     virtual_key = {"space": 0x20, "w": 0x57, "s": 0x53}.get(key.lower())
@@ -247,6 +392,8 @@ def post_key_tap(handle: int, key: str, hold_ms: int = 0) -> None:
     down_lparam = 1 | (scan_code << 16)
     up_lparam = down_lparam | (1 << 30) | (1 << 31)
     hwnd = wintypes.HWND(handle)
+    if activate_message and not _user32.PostMessageW(hwnd, WM_ACTIVATE, WA_ACTIVE, 0):
+        raise ctypes.WinError(ctypes.get_last_error())
     if not _user32.PostMessageW(hwnd, WM_KEYDOWN, virtual_key, down_lparam):
         raise ctypes.WinError(ctypes.get_last_error())
     if hold_ms:

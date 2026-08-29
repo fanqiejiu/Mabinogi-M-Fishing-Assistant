@@ -5,3 +5,4 @@ opencv-python==5.0.0.93
 PyAutoGUI==0.9.54
 pynput==1.8.2
 PySide6==6.10.2
+ok-script[default]==2.0.6

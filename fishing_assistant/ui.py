@@ -173,6 +173,7 @@ class MainWindow(QMainWindow):
         self.update_ready.connect(self._show_update_result)
         self._navigation: list[QPushButton] = []
         self._last_release_url: str | None = None
+        self._auto_detected_game_window: window_target.WindowInfo | None = None
 
         self.setWindowTitle(APP_NAME)
         if APP_ICON_PATH.exists():
@@ -256,7 +257,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._nav_button("使用说明", 3))
         layout.addStretch(1)
 
-        footer = QLabel(f"v{APP_VERSION}  ·  by {APP_AUTHOR}")
+        footer = QLabel(f"v{APP_VERSION}  ·  {APP_AUTHOR}")
         footer.setObjectName("brandSubtitle")
         footer.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(footer)
@@ -357,6 +358,9 @@ class MainWindow(QMainWindow):
         self.target_mode_combo = QComboBox()
         self.target_mode_combo.addItem("屏幕坐标模式（稳定）", "screen")
         self.target_mode_combo.addItem("指定窗口后台模式（实验性）", "window")
+        self.window_backend_combo = QComboBox()
+        self.window_backend_combo.addItem("OK 后台引擎（WGC + PostMessage）", "ok")
+        self.window_backend_combo.addItem("兼容引擎（PrintWindow）", "printwindow")
         self.target_window_combo = QComboBox()
         self.refresh_windows_button = QPushButton("刷新窗口")
         target_window_row = QWidget()
@@ -366,9 +370,21 @@ class MainWindow(QMainWindow):
         target_window_layout.addWidget(self.target_window_combo, 1)
         target_window_layout.addWidget(self.refresh_windows_button)
         target.addWidget(self._form_label("捕捉与按键模式", "后台模式只向指定窗口投递按键"), 0, 0)
-        target.addWidget(self._form_label("后台目标窗口", "选中洛奇 M 的游戏主窗口"), 0, 1)
+        target.addWidget(
+            self._form_label("后台目标窗口", "优先检测窗口名称“瑪奇 Mobile”；找不到时可手动选择"),
+            0,
+            1,
+        )
         target.addWidget(self.target_mode_combo, 1, 0)
         target.addWidget(target_window_row, 1, 1)
+        target.addWidget(
+            self._form_label("后台引擎", "OK 引擎使用 WGC 截图与后台消息；兼容引擎适合排障。"),
+            2,
+            0,
+            1,
+            2,
+        )
+        target.addWidget(self.window_backend_combo, 3, 0, 1, 2)
         layout.addLayout(target)
         self.target_mode_status = QLabel()
         self.target_mode_status.setObjectName("cardHint")
@@ -660,10 +676,17 @@ class MainWindow(QMainWindow):
         identity_layout.setContentsMargins(24, 22, 24, 22)
         identity_layout.setSpacing(7)
         identity_layout.addLayout(self._card_heading("应用设置", "本页的网络与诊断功能均由你主动控制。"))
-        version = QLabel(f"{APP_NAME}  ·  v{APP_VERSION}  ·  by {APP_AUTHOR}")
+        version = QLabel(f"{APP_NAME}  ·  v{APP_VERSION}")
         version.setObjectName("metricValue")
         version.setStyleSheet("font-size: 18px; padding-top: 5px;")
         identity_layout.addWidget(version)
+        ok_credit = QLabel(
+            '后台自动化核心：<a href="https://github.com/ok-oldking/ok-script">ok-script</a> '
+            '（Apache-2.0 + Commons Clause）。'
+        )
+        ok_credit.setObjectName("cardHint")
+        ok_credit.setOpenExternalLinks(True)
+        identity_layout.addWidget(ok_credit)
         layout.addWidget(identity)
 
         update_card = Card()
@@ -797,16 +820,25 @@ class MainWindow(QMainWindow):
         except Exception as error:  # pragma: no cover - 由 Windows 会话状态决定
             windows = []
             self.target_mode_status.setText(f"无法读取窗口列表：{error}")
+        windows = [target for target in windows if target.title != self.windowTitle()]
+        preferred_target = window_target.find_mabinogi_mobile_window(windows)
+        self._auto_detected_game_window = preferred_target
         for target in windows:
-            if target.title == self.windowTitle():
-                continue
             self.target_window_combo.addItem(
                 f"{target.title}  ·  {target.width} × {target.height}", target
             )
         if self.target_window_combo.count() == 0:
             self.target_window_combo.addItem("未发现可选窗口，请打开洛奇 M 后刷新", None)
-        self._select_target_window(current_handle, current_title)
+        if preferred_target is not None:
+            self._select_target_window(preferred_target.handle, preferred_target.title)
+        else:
+            self._select_target_window(current_handle, current_title)
         del blocker
+        if preferred_target is not None:
+            self.engine.update_config(
+                target_window_handle=preferred_target.handle,
+                target_window_title=preferred_target.title,
+            )
         self._sync_target_mode_controls()
 
     def _select_target_window(self, handle: int, title: str) -> None:
@@ -822,15 +854,29 @@ class MainWindow(QMainWindow):
         is_window_mode = self.target_mode_combo.currentData() == "window"
         self.target_window_combo.setEnabled(is_window_mode)
         self.refresh_windows_button.setEnabled(is_window_mode)
+        self.window_backend_combo.setEnabled(is_window_mode)
         if is_window_mode:
             target = self.target_window_combo.currentData()
             if isinstance(target, window_target.WindowInfo):
-                selection = f"当前目标：{target.title}。"
+                if (
+                    self._auto_detected_game_window is not None
+                    and target.handle == self._auto_detected_game_window.handle
+                ):
+                    selection = f"已自动检测窗口名称“瑪奇 Mobile”：{target.title}。"
+                else:
+                    selection = f"当前手动目标：{target.title}。"
             else:
-                selection = "尚未选择可用目标窗口。"
+                selection = "未检测到“瑪奇 Mobile”，请从下拉列表选择游戏窗口。"
+            backend = str(self.window_backend_combo.currentData())
+            engine_text = (
+                "OK 后台引擎：由 ok-script 提供 WGC 截图与 WM_ACTIVATE + PostMessage；"
+                if backend == "ok"
+                else "兼容引擎：使用 PrintWindow 截图与 WM_ACTIVATE + PostMessage；"
+            )
             self.target_mode_status.setText(
-                "实验性后台模式：截图与 Space / W / S 只发送至这个窗口；"
-                "请保持洛奇 M 窗口未最小化。若游戏不支持后台截图或定向按键，监测会自动暂停。"
+                engine_text
+                + "Space / W / S 只发送至这个窗口。请保持洛奇 M 窗口未最小化；"
+                "若游戏忽略后台消息，监测会暂停且不会把按键发往当前前台程序。"
                 + selection
             )
         else:
@@ -847,6 +893,7 @@ class MainWindow(QMainWindow):
             self.mode_combo,
             self.resolution_combo,
             self.target_mode_combo,
+            self.window_backend_combo,
             self.target_window_combo,
             self.threshold_slider,
             self.roi_width_spin,
@@ -868,6 +915,7 @@ class MainWindow(QMainWindow):
         self._select_combo_data(self.monitor_combo, config.monitor_index)
         self._select_combo_data(self.mode_combo, config.display_mode)
         self._select_combo_data(self.target_mode_combo, config.capture_mode)
+        self._select_combo_data(self.window_backend_combo, config.window_backend)
         self._select_target_window(config.target_window_handle, config.target_window_title)
         self._select_combo_text(self.resolution_combo, config.selected_resolution)
         self.threshold_slider.setValue(config.fish_red_pixel_threshold)
@@ -893,6 +941,7 @@ class MainWindow(QMainWindow):
         self.mode_combo.currentIndexChanged.connect(self._save_profile)
         self.resolution_combo.currentIndexChanged.connect(self._save_profile)
         self.target_mode_combo.currentIndexChanged.connect(self._target_mode_changed)
+        self.window_backend_combo.currentIndexChanged.connect(self._target_mode_changed)
         self.target_window_combo.currentIndexChanged.connect(self._save_profile)
         self.refresh_windows_button.clicked.connect(self._refresh_target_windows)
         self.calibrate_button.clicked.connect(self._calibrate)
@@ -952,6 +1001,7 @@ class MainWindow(QMainWindow):
             display_mode=str(self.mode_combo.currentData()),
             selected_resolution=self.resolution_combo.currentText(),
             capture_mode=str(self.target_mode_combo.currentData()),
+            window_backend=str(self.window_backend_combo.currentData()),
             target_window_handle=target_handle,
             target_window_title=target_title,
         )
@@ -1072,7 +1122,7 @@ class MainWindow(QMainWindow):
             return
         QApplication.clipboard().setText(str(bundle_path))
         self.diagnostic_status.setText(
-            f"已在本机生成诊断包，并将路径复制到剪贴板：{bundle_path}。请自行发送给 {APP_AUTHOR}。"
+            f"已在本机生成诊断包，并将路径复制到剪贴板：{bundle_path}。请自行发送给项目维护者。"
         )
         self._append_log("已生成本地诊断包；不会自动上传。", EventKind.INFO)
 
@@ -1156,6 +1206,11 @@ class MainWindow(QMainWindow):
         elif event.kind == EventKind.ERROR:
             self._set_status("warning", "●  识别已暂停")
             self.runtime_detail.setText(event.message)
+            self.runtime_title.setText("已暂停")
+            self.start_button.setText("开始监测")
+            self.start_button.setObjectName("primaryButton")
+            self.start_button.style().unpolish(self.start_button)
+            self.start_button.style().polish(self.start_button)
         elif event.kind == EventKind.SUCCESS:
             self.runtime_detail.setText(event.message)
             if event.debug_image is not None:
