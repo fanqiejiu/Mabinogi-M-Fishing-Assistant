@@ -1,0 +1,23 @@
+# Python virtual environment and generated Python files
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Per-user calibration / diagnostic output
+fishing_config.json
+fishing_roi_debug.png
+ui_qa.png
+ui_qa_day.png
+ui_qa_detection.png
+
+# PyInstaller output
+build/
+dist/
+*.spec
+
+# Editor and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
