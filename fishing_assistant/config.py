@@ -39,7 +39,8 @@ class AppConfig:
     recovery_pause_ms: int = 120
     recovery_cooldown_ms: int = 4500
     recast_delay_ms: int = 650
-    github_repository: str = ""
+    # 默认只用于手动检查；用户可在设置中修改或启用启动时自动检查。
+    github_repository: str = "fanqiejiu/Mabinogi-M-Fishing-Assistant"
     github_auto_check: bool = False
 
     def copy(self, **changes: object) -> "AppConfig":

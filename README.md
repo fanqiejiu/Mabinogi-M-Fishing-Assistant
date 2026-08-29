@@ -67,7 +67,7 @@
 - 本地钓鱼配置保存在项目目录的 `fishing_config.json`，不会提交至 Git。
 - 错误日志和用户主动生成的诊断 ZIP 保存于 `%LOCALAPPDATA%\MabinogiFishingHelper\`。
 - 诊断信息只包含应用错误、版本及启动时读取的一次性硬件型号；**不会自动上传、发送或持续监控**。
-- GitHub 更新检查只在用户填写仓库并点击检查（或启用自动检查）时访问 GitHub Latest Release API。
+- GitHub 更新检查默认指向本仓库；仅在用户点击检查（或启用自动检查）时访问 GitHub Latest Release API。
 
 ## 项目结构
 
