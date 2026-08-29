@@ -24,7 +24,10 @@ else:  # pragma: no cover - Windows 桌面工具
 WM_KEYDOWN = 0x0100
 WM_KEYUP = 0x0101
 WM_ACTIVATE = 0x0006
+WM_MOUSEMOVE = 0x0200
+WM_MOUSEWHEEL = 0x020A
 WA_ACTIVE = 1
+SW_RESTORE = 9
 PW_RENDERFULLCONTENT = 0x00000002
 DIB_RGB_COLORS = 0
 BI_RGB = 0
@@ -82,6 +85,12 @@ if _user32 is not None and _gdi32 is not None:
     _user32.MapVirtualKeyW.restype = wintypes.UINT
     _user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
     _user32.PostMessageW.restype = wintypes.BOOL
+    _user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+    _user32.ShowWindow.restype = wintypes.BOOL
+    _user32.BringWindowToTop.argtypes = [wintypes.HWND]
+    _user32.BringWindowToTop.restype = wintypes.BOOL
+    _user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+    _user32.SetForegroundWindow.restype = wintypes.BOOL
     _gdi32.CreateCompatibleDC.argtypes = [wintypes.HDC]
     _gdi32.CreateCompatibleDC.restype = wintypes.HDC
     _gdi32.CreateDIBSection.argtypes = [
@@ -145,6 +154,9 @@ class _OkWindowAdapter:
     def get_abs_cords(self, x: int, y: int) -> tuple[int, int]:
         return self.x + x, self.y + y
 
+    def get_top_window_cords(self, x: int, y: int) -> tuple[int, int]:
+        return x, y
+
 
 class OkWindowBackend:
     """用 ok-script 的 WGC 与 PostMessage 组件提供指定窗口的实验性后台后端。"""
@@ -190,6 +202,15 @@ class OkWindowBackend:
         self._capture = capture
         self._interaction = PostMessageInteraction(capture, self._adapter)
 
+    def _get_frame_with_warmup(self) -> np.ndarray:
+        """WGC 建立会话后的首帧可能稍晚到达，短暂重试而非立刻暂停监测。"""
+        for _attempt in range(10):
+            frame = self._capture.get_frame()  # type: ignore[union-attr]
+            if isinstance(frame, np.ndarray) and frame.ndim == 3 and frame.size:
+                return frame
+            time.sleep(0.06)
+        raise RuntimeError("OK WGC 预热后仍未收到窗口画面，请确认游戏未最小化。")
+
     def capture_region(
         self,
         info: WindowInfo,
@@ -200,10 +221,16 @@ class OkWindowBackend:
         self.update(info)
         with self._lock:
             self._ensure_started()
-            frame = self._capture.get_frame()  # type: ignore[union-attr]
-        if frame is None:
-            raise RuntimeError("OK WGC 未收到窗口画面，请确认游戏未最小化。")
+            frame = self._get_frame_with_warmup()
         return _crop_backend_frame(frame, info, center_offset, width, height)
+
+    def capture_frame(self, info: WindowInfo) -> np.ndarray:
+        """返回完整 WGC 画面，用于在上钩期间寻找动态体力条。"""
+        self.update(info)
+        with self._lock:
+            self._ensure_started()
+            frame = self._get_frame_with_warmup()
+        return frame.copy()
 
     def tap_key(self, key: str, hold_ms: int = 0) -> None:
         with self._lock:
@@ -211,6 +238,13 @@ class OkWindowBackend:
             self._interaction.send_key(  # type: ignore[union-attr]
                 key, max(0.01, hold_ms / 1000)
             )
+
+    def keep_hover(self, info: WindowInfo, center_offset: tuple[int, int]) -> None:
+        """仅向目标窗口投递虚拟鼠标移动，不改变系统真实光标。"""
+        self.update(info)
+        with self._lock:
+            self._ensure_started()
+            self._interaction.move(*center_offset)  # type: ignore[union-attr]
 
     def close(self) -> None:
         self._exit_event.set()
@@ -316,6 +350,14 @@ def resolve_window(handle: int, title: str) -> WindowInfo | None:
     return matches[0] if len(matches) == 1 else None
 
 
+def capture_window_frame(handle: int) -> np.ndarray:
+    """以 PrintWindow 捕捉完整目标窗口，供动态体力条识别使用。"""
+    _require_windows()
+    info = get_window_info(handle)
+    if info is None:
+        raise RuntimeError("目标窗口不存在、已隐藏或已关闭。")
+    return _capture_window_bgra(info)
+
 def capture_window_region(
     handle: int,
     center_offset: tuple[int, int],
@@ -376,6 +418,57 @@ def _capture_window_bgra(info: WindowInfo) -> np.ndarray:
         _gdi32.DeleteObject(bitmap)
         _gdi32.DeleteDC(memory_dc)
         _user32.ReleaseDC(hwnd, screen_dc)
+
+
+def activate_window(handle: int) -> WindowInfo:
+    """将目标窗口短暂切到前台，用于游戏只接受真实鼠标滚轮的场景。"""
+    _require_windows()
+    info = get_window_info(handle)
+    if info is None:
+        raise RuntimeError("目标窗口已关闭或不可见，无法切换到前台。")
+    hwnd = wintypes.HWND(info.handle)
+    if _user32.IsIconic(hwnd):
+        _user32.ShowWindow(hwnd, SW_RESTORE)
+    _user32.BringWindowToTop(hwnd)
+    if not _user32.SetForegroundWindow(hwnd):
+        raise RuntimeError("Windows 未允许切换目标窗口到前台。")
+    return info
+
+
+def post_mouse_wheel(handle: int, steps: int) -> None:
+    """向目标窗口投递向上/向下滚轮消息，不影响当前前台窗口。"""
+    _require_windows()
+    info = get_window_info(handle)
+    if info is None:
+        raise RuntimeError("目标窗口已关闭或不可见，未发送滚轮消息。")
+    if steps == 0:
+        return
+    hwnd = wintypes.HWND(info.handle)
+    if not _user32.PostMessageW(hwnd, WM_ACTIVATE, WA_ACTIVE, 0):
+        raise ctypes.WinError(ctypes.get_last_error())
+    direction = 1 if steps > 0 else -1
+    wheel_wparam = ((direction * 120) & 0xFFFF) << 16
+    # WM_MOUSEWHEEL 的 lParam 使用屏幕坐标；投到窗口中心可兼容会检查鼠标位置的客户端。
+    center_x = info.left + info.width // 2
+    center_y = info.top + info.height // 2
+    wheel_lparam = ((center_y & 0xFFFF) << 16) | (center_x & 0xFFFF)
+    for _ in range(abs(steps)):
+        if not _user32.PostMessageW(hwnd, WM_MOUSEWHEEL, wheel_wparam, wheel_lparam):
+            raise ctypes.WinError(ctypes.get_last_error())
+        time.sleep(0.04)
+
+
+def post_mouse_move(handle: int, center_offset: tuple[int, int]) -> None:
+    """在目标窗口内维持虚拟悬停，不移动用户正在使用的真实鼠标。"""
+    _require_windows()
+    info = get_window_info(handle)
+    if info is None:
+        raise RuntimeError("目标窗口已关闭或不可见，无法维持后台悬停。")
+    x = min(max(0, int(center_offset[0])), max(0, info.width - 1))
+    y = min(max(0, int(center_offset[1])), max(0, info.height - 1))
+    lparam = ((y & 0xFFFF) << 16) | (x & 0xFFFF)
+    if not _user32.PostMessageW(wintypes.HWND(info.handle), WM_MOUSEMOVE, 0, lparam):
+        raise ctypes.WinError(ctypes.get_last_error())
 
 
 def post_key_tap(

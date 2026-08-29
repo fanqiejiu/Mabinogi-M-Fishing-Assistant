@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 
+from .constants import GITHUB_REPOSITORY
 
-APP_DIR = Path(__file__).resolve().parent.parent
+
+APP_DIR = (
+    Path(sys.executable).resolve().parent
+    if getattr(sys, "frozen", False)
+    else Path(__file__).resolve().parent.parent
+)
 CONFIG_PATH = APP_DIR / "fishing_config.json"
 DEBUG_IMAGE_PATH = APP_DIR / "fishing_roi_debug.png"
 
@@ -16,7 +23,7 @@ DEBUG_IMAGE_PATH = APP_DIR / "fishing_roi_debug.png"
 class AppConfig:
     """以后新增选项时，在此处加入字段即可自动兼容旧配置文件。"""
 
-    schema_version: int = 6
+    schema_version: int = 10
     button_center: tuple[int, int] | None = None
     monitor_index: int = 1
     display_mode: str = "borderless"
@@ -39,6 +46,13 @@ class AppConfig:
     recovery_pause_ms: int = 120
     recovery_cooldown_ms: int = 4500
     recast_delay_ms: int = 650
+    # stamina_bounce：角色头顶绿条反弹时收鱼；fixed_delay：按自定义秒数收鱼；instant：上钩即收。
+    catch_strategy: str = "stamina_bounce"
+    fallback_collect_delay_seconds: int = 14
+    stamina_scan_interval_ms: int = 60
+    stamina_zoom_in_steps: int = 5
+    # 模式一检测到跑鱼提示后记录本次上钩持续时间，供下一次计时兜底。
+    learned_escape_seconds: float = 0.0
     # screen：当前稳定模式；window：指定窗口后台模式（实验性）。
     capture_mode: str = "screen"
     # ok：OK 框架的 WGC 截图 + PostMessage；printwindow：旧版兼容实现。
@@ -46,9 +60,9 @@ class AppConfig:
     target_window_handle: int = 0
     target_window_title: str = ""
     target_button_offset: tuple[int, int] | None = None
-    # 默认只用于手动检查；用户可在设置中修改或启用启动时自动检查。
-    github_repository: str = "fanqiejiu/Mabinogi-M-Fishing-Assistant"
-    github_auto_check: bool = False
+    # 更新源固定为项目仓库，并在每次启动后自动检查 Latest Release。
+    github_repository: str = GITHUB_REPOSITORY
+    github_auto_check: bool = True
 
     def copy(self, **changes: object) -> "AppConfig":
         return replace(self, **changes)
@@ -76,6 +90,18 @@ def load_config() -> AppConfig:
         raw["schema_version"] = 5
     if int(raw.get("schema_version", 0)) < 6:
         raw["schema_version"] = 6
+    if int(raw.get("schema_version", 0)) < 7:
+        raw["schema_version"] = 7
+    if int(raw.get("schema_version", 0)) < 8:
+        raw["schema_version"] = 8
+    if int(raw.get("schema_version", 0)) < 9:
+        raw["schema_version"] = 9
+    if int(raw.get("schema_version", 0)) < 10:
+        raw["learned_escape_seconds"] = 0.0
+        raw["schema_version"] = 10
+    # 不受旧配置影响，更新源始终固定在项目自身仓库并默认启用启动检查。
+    raw["github_repository"] = GITHUB_REPOSITORY
+    raw["github_auto_check"] = True
 
     valid_names = {field.name for field in fields(AppConfig)}
     values = {name: value for name, value in raw.items() if name in valid_names}

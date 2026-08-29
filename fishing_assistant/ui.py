@@ -16,9 +16,10 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
+
     QMainWindow,
     QPlainTextEdit,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QSlider,
@@ -30,7 +31,14 @@ from PySide6.QtWidgets import (
 
 from . import window_target
 from .config import AppConfig, default_config
-from .constants import APP_AUTHOR, APP_DISPLAY_VERSION, APP_ICON_PATH, APP_NAME, APP_VERSION
+from .constants import (
+    APP_AUTHOR,
+    APP_DISPLAY_VERSION,
+    APP_ICON_PATH,
+    APP_NAME,
+    APP_VERSION,
+    GITHUB_REPOSITORY,
+)
 from .diagnostics import LOG_DIR, create_support_bundle, record_error, set_system_profile
 from .engine import EngineEvent, EventKind, FishingEngine
 from .system_profile import SystemProfile, collect_system_profile
@@ -48,6 +56,18 @@ QFrame#card, QFrame#metricCard {
     border-radius: 16px;
 }
 QFrame#metricCard { border-radius: 12px; background: #0D192A; }
+QFrame#backendOptions, QFrame#strategyOption {
+    background: #0D192A; border: 1px solid #263A54; border-radius: 10px;
+}
+QFrame#backendOptions[modeActive="true"] { background: #102A31; border-color: #2DB88B; }
+QFrame#backendOptions[modeActive="true"] QLabel#formLabel { color: #E8FFF7; }
+QFrame#backendOptions[modeActive="true"] QLabel#helper { color: #94C9B8; }
+QLabel#backendModeBadge { color: #75E4BE; font-size: 11px; font-weight: 700; }
+QFrame#backendOptions:disabled { background: #0A1423; border-color: #1C2A3D; }
+QFrame#backendOptions:disabled QLabel { color: #5E728A; }
+QFrame#backendOptions:disabled QComboBox, QFrame#backendOptions:disabled QPushButton {
+    background: #0A1423; border-color: #203047; color: #5E728A;
+}
 QLabel#eyebrow { color: #7F9BBC; font-size: 11px; font-weight: 700; letter-spacing: 1px; }
 QLabel#pageTitle { color: #F8FBFF; font-size: 28px; font-weight: 700; }
 QLabel#pageSubtitle { color: #91A5BF; font-size: 13px; }
@@ -85,6 +105,7 @@ QComboBox, QSpinBox, QLineEdit {
     padding: 9px 11px; min-height: 20px; color: #EDF5FE;
 }
 QComboBox:hover, QSpinBox:hover, QLineEdit:hover { border-color: #4B6E94; }
+QComboBox:disabled, QSpinBox:disabled { background: #0A1423; border-color: #203047; color: #5E728A; }
 QComboBox::drop-down { border: 0; width: 24px; }
 QComboBox QAbstractItemView { background: #132136; border: 1px solid #314963; selection-background-color: #1C5448; color: #EEF5FD; }
 QSpinBox::up-button, QSpinBox::down-button { width: 19px; border: 0; }
@@ -111,6 +132,16 @@ QWidget { color: #1B2A40; }
 QFrame#sidebar { background: #FFFFFF; border-right-color: #D9E3EF; }
 QFrame#card, QFrame#metricCard { background: #FFFFFF; border-color: #D7E2EE; }
 QFrame#metricCard { background: #F8FBFE; }
+QFrame#backendOptions, QFrame#strategyOption { background: #F8FBFE; border-color: #D4E0EC; }
+QFrame#backendOptions[modeActive="true"] { background: #ECFAF5; border-color: #70CBAE; }
+QFrame#backendOptions[modeActive="true"] QLabel#formLabel { color: #163F34; }
+QFrame#backendOptions[modeActive="true"] QLabel#helper { color: #47776A; }
+QLabel#backendModeBadge { color: #16835F; }
+QFrame#backendOptions:disabled { background: #EEF3F8; border-color: #D9E3ED; }
+QFrame#backendOptions:disabled QLabel { color: #8A9AAF; }
+QFrame#backendOptions:disabled QComboBox, QFrame#backendOptions:disabled QPushButton {
+    background: #EEF3F8; border-color: #D9E3ED; color: #8A9AAF;
+}
 QLabel#eyebrow, QLabel#brandSubtitle, QLabel#metricCaption, QLabel#cardHint, QLabel#helper, QLabel#pageSubtitle { color: #667B95; }
 QLabel#pageTitle, QLabel#cardTitle, QLabel#metricValue, QLabel#brandTitle { color: #14233A; }
 QLabel#statusChip { background: #EDF2F7; border-color: #D3DFEC; color: #556B85; }
@@ -125,11 +156,14 @@ QPushButton:pressed { background: #DCE8F3; }
 QPushButton#dangerButton { background: #FFF0F2; border-color: #E6A3AE; color: #9A3442; }
 QComboBox, QSpinBox, QLineEdit { background: #FFFFFF; border-color: #C8D7E6; color: #1C304A; }
 QComboBox:hover, QSpinBox:hover, QLineEdit:hover { border-color: #81A4C9; }
+QComboBox:disabled, QSpinBox:disabled { background: #EEF3F8; border-color: #D9E3ED; color: #8A9AAF; }
 QComboBox QAbstractItemView { background: #FFFFFF; border-color: #C8D7E6; selection-background-color: #DDF5EA; color: #1C304A; }
 QSlider::groove:horizontal { background: #D7E3EF; }
 QSlider::handle:horizontal { background: #158D68; }
 QPlainTextEdit { background: #F8FBFE; border-color: #D4E0EC; color: #425C79; }
 QScrollBar::handle:vertical { background: #B6C9DA; }
+QProgressBar { background: #DCE8F3; }
+QProgressBar::chunk { background: #20A977; }
 QCheckBox { color: #29415D; }
 QLabel#formLabel { color: #263B55; }
 QLabel#helpStep { color: #3D5774; }
@@ -369,22 +403,30 @@ class MainWindow(QMainWindow):
         target_window_layout.setSpacing(8)
         target_window_layout.addWidget(self.target_window_combo, 1)
         target_window_layout.addWidget(self.refresh_windows_button)
-        target.addWidget(self._form_label("捕捉与按键模式", "后台模式只向指定窗口投递按键"), 0, 0)
-        target.addWidget(
-            self._form_label("后台目标窗口", "优先检测窗口名称“瑪奇 Mobile”；找不到时可手动选择"),
-            0,
-            1,
+
+        self.backend_options_panel = QFrame()
+        self.backend_options_panel.setObjectName("backendOptions")
+        backend_layout = QVBoxLayout(self.backend_options_panel)
+        backend_layout.setContentsMargins(14, 13, 14, 14)
+        backend_layout.setSpacing(8)
+        self.backend_mode_badge = QLabel()
+        self.backend_mode_badge.setObjectName("backendModeBadge")
+        backend_layout.addWidget(self.backend_mode_badge)
+        backend_layout.addWidget(
+            self._form_label("后台目标窗口", "优先检测窗口名称“瑪奇 Mobile”；找不到时可手动选择")
         )
-        target.addWidget(self.target_mode_combo, 1, 0)
-        target.addWidget(target_window_row, 1, 1)
-        target.addWidget(
-            self._form_label("后台引擎", "OK 引擎使用 WGC 截图与后台消息；兼容引擎适合排障。"),
-            2,
-            0,
-            1,
-            2,
+        backend_layout.addWidget(target_window_row)
+        backend_layout.addWidget(
+            self._form_label("后台引擎", "OK 引擎使用 WGC 截图与后台消息；兼容引擎适合排障。")
         )
-        target.addWidget(self.window_backend_combo, 3, 0, 1, 2)
+        backend_layout.addWidget(self.window_backend_combo)
+
+        target.addWidget(self._form_label("捕捉与按键模式", "屏幕模式要求游戏在前台；后台模式只向指定窗口投递按键"), 0, 0)
+        target.addWidget(self._form_label("后台窗口与引擎", "仅在指定窗口后台模式下可用"), 0, 1)
+        target.addWidget(self.target_mode_combo, 1, 0, Qt.AlignmentFlag.AlignTop)
+        target.addWidget(self.backend_options_panel, 1, 1)
+        target.setColumnStretch(0, 1)
+        target.setColumnStretch(1, 2)
         layout.addLayout(target)
         self.target_mode_status = QLabel()
         self.target_mode_status.setObjectName("cardHint")
@@ -404,8 +446,8 @@ class MainWindow(QMainWindow):
         self.calibration_summary.setObjectName("cardHint")
         calibration_text.addWidget(calibration_title)
         calibration_text.addWidget(self.calibration_summary)
-        self.calibrate_button = QPushButton("校准当前鼠标位置")
-        self.calibrate_button.setObjectName("primaryButton")
+        self.calibrate_button = QPushButton("使用 F7 校准")
+        self.calibrate_button.setToolTip("将鼠标停在钓鱼按钮中心后按 F7；此按钮不会记录当前助手窗口的位置。")
         calibration.addLayout(calibration_text, 1)
         calibration.addWidget(self.calibrate_button, 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addLayout(calibration)
@@ -432,13 +474,23 @@ class MainWindow(QMainWindow):
         state_row.addWidget(self.start_button, 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addLayout(state_row)
 
+        metrics = QGridLayout()
+        metrics.setHorizontalSpacing(12)
         self.red_metric = MetricCard("当前红色像素", "0 px")
-        layout.addWidget(self.red_metric)
+        self.stamina_metric = MetricCard("活鱼体力条", "等待上钩")
+        metrics.addWidget(self.red_metric, 0, 0)
+        metrics.addWidget(self.stamina_metric, 0, 1)
+        layout.addLayout(metrics)
         self.red_progress = QSlider(Qt.Orientation.Horizontal)
         self.red_progress.setEnabled(False)
         self.red_progress.setMinimum(0)
         self.red_progress.setMaximum(1200)
         layout.addWidget(self.red_progress)
+        self.stamina_progress = QProgressBar()
+        self.stamina_progress.setRange(0, 100)
+        self.stamina_progress.setValue(0)
+        self.stamina_progress.setTextVisible(False)
+        layout.addWidget(self.stamina_progress)
 
         shortcuts = QGridLayout()
         shortcuts.setHorizontalSpacing(9)
@@ -532,6 +584,61 @@ class MainWindow(QMainWindow):
         card_layout.addLayout(threshold_header)
         card_layout.addWidget(self.threshold_slider)
 
+        catch_grid = QGridLayout()
+        catch_grid.setHorizontalSpacing(18)
+        catch_grid.setVerticalSpacing(10)
+        self.catch_strategy_combo = QComboBox()
+        self.catch_strategy_combo.addItem("模式 1：体力条反弹（实验性功能，不稳定）", "stamina_bounce")
+        self.catch_strategy_combo.addItem("模式 2：固定计时收鱼", "fixed_delay")
+        self.catch_strategy_combo.addItem("模式 3：上钩立即收杆", "instant")
+        self.fallback_delay_spin = self._spin_box(5, 60, 14, " 秒")
+        self.stamina_zoom_spin = self._spin_box(0, 12, 5, " 格")
+
+        def option_panel(title: str, hint: str, control: QWidget | None = None) -> QFrame:
+            panel = QFrame()
+            panel.setObjectName("strategyOption")
+            option_layout = QVBoxLayout(panel)
+            option_layout.setContentsMargins(14, 12, 14, 12)
+            option_layout.setSpacing(5)
+            option_layout.addWidget(self._form_label(title, hint))
+            if control is not None:
+                option_layout.addWidget(control)
+            return panel
+
+        self.learned_escape_label = QLabel()
+        self.learned_escape_label.setObjectName("helper")
+        self.learned_escape_label.setWordWrap(True)
+        mode_one_panel = option_panel(
+            "向上滚轮次数",
+            "启动模式 1 时会短暂切到游戏并发送真实向上滚轮放大画面；0 表示不自动滚动。",
+            self.stamina_zoom_spin,
+        )
+        mode_one_panel.layout().addWidget(self.learned_escape_label)
+
+        self.catch_option_stack = QStackedWidget()
+        self.catch_option_stack.addWidget(mode_one_panel)
+        self.catch_option_stack.addWidget(
+            option_panel("收杆等待时长", "上钩后等待指定秒数再按 Space，默认 14 秒。", self.fallback_delay_spin)
+        )
+        self.catch_option_stack.addWidget(
+            option_panel("模式 3 已就绪", "检测到上钩图标后立即按 Space 收杆，无额外参数。")
+        )
+        catch_grid.addWidget(
+            self._form_label("收鱼模式", "模式 1 第一次下降穿过半条只记录，反弹后第二次穿过半条才收杆。"),
+            0,
+            0,
+        )
+        catch_grid.addWidget(self._form_label("当前模式参数", "只显示当前模式需要的设置。"), 0, 1)
+        catch_grid.addWidget(self.catch_strategy_combo, 1, 0)
+        catch_grid.addWidget(self.catch_option_stack, 1, 1)
+        catch_grid.setColumnStretch(0, 1)
+        catch_grid.setColumnStretch(1, 1)
+        card_layout.addLayout(catch_grid)
+        self.catch_strategy_hint = QLabel()
+        self.catch_strategy_hint.setObjectName("cardHint")
+        self.catch_strategy_hint.setWordWrap(True)
+        card_layout.addWidget(self.catch_strategy_hint)
+
         grid = QGridLayout()
         grid.setHorizontalSpacing(18)
         grid.setVerticalSpacing(15)
@@ -604,7 +711,7 @@ class MainWindow(QMainWindow):
         note_layout.addWidget(QLabel("扩展设计"), 0)
         note.layout().itemAt(0).widget().setObjectName("cardTitle")
         detail = QLabel(
-            "识别引擎、配置文件和界面页面相互独立。以后添加 OCR 备用策略、多个钓鱼配置、统计报表或窗口自动定位时，可新增模块而无需重写当前检测循环。"
+            "识别引擎、固定提示文字模板、配置文件和界面页面相互独立。以后添加多个钓鱼配置、统计报表或窗口自动定位时，可新增模块而无需重写当前检测循环。"
         )
         detail.setObjectName("cardHint")
         detail.setWordWrap(True)
@@ -630,7 +737,7 @@ class MainWindow(QMainWindow):
         card_layout.addLayout(self._card_heading("开始前检查", "一次正确校准比固定等待时间更可靠。"))
         steps = [
             "1. 在游戏内确认分辨率和画面模式，然后在“控制台”中选择对应配置。",
-            "2. 把鼠标停在右下角圆形钓鱼按钮的正中心，点击“校准当前鼠标位置”或按 F7。",
+            "2. 把鼠标停在右下角圆形钓鱼按钮的正中心，直接按 F7；不会弹出确认，也不会移动鼠标。",
             "3. 用“检查识别区域”保存快照，确认圆形按钮没有被截断。",
             "4. 游戏回到前台后点击“开始监测”或按 F8；Esc 会紧急停止监测。",
         ]
@@ -647,7 +754,7 @@ class MainWindow(QMainWindow):
         hotkey_layout.addWidget(QLabel("全局快捷键"), 0, 0, 1, 2)
         hotkey_layout.itemAtPosition(0, 0).widget().setObjectName("cardTitle")
         for row, (key, description) in enumerate(
-            (("F7", "记录当前鼠标位置为钓鱼按钮中心"), ("F8", "开始或暂停监测"), ("F9", "保存当前识别区域"), ("Esc", "紧急停止监测")),
+            (("F7", "立即记录当前鼠标位置为钓鱼按钮中心（不移动鼠标）"), ("F8", "开始或暂停监测"), ("F9", "保存当前识别区域"), ("Esc", "紧急停止监测")),
             start=1,
         ):
             key_label = QLabel(key)
@@ -696,19 +803,24 @@ class MainWindow(QMainWindow):
         update_layout.addLayout(
             self._card_heading(
                 "GitHub 更新检查",
-                "仅访问你填写的公开仓库的 Latest Release；可手动检查，也可在启动后自动检查。",
+                "更新源固定为本项目仓库；每次启动后自动检查 Latest Release。",
             )
         )
         update_grid = QGridLayout()
         update_grid.setHorizontalSpacing(18)
-        update_grid.setVerticalSpacing(11)
-        self.github_repo_edit = QLineEdit()
-        self.github_repo_edit.setPlaceholderText("fanqiejiu/Mabinogi-M-Fishing-Assistant")
-        self.github_repo_edit.setClearButtonEnabled(True)
-        update_grid.addWidget(self._form_label("GitHub 仓库", "默认：fanqiejiu/Mabinogi-M-Fishing-Assistant"), 0, 0)
-        update_grid.addWidget(self.github_repo_edit, 1, 0)
+        update_grid.setVerticalSpacing(7)
+        update_grid.addWidget(self._form_label("GitHub 仓库", "更新源固定为当前项目"), 0, 0)
+        self.github_repo_link = QLabel(
+            f'<a href="https://github.com/{GITHUB_REPOSITORY}">{GITHUB_REPOSITORY}</a>'
+        )
+        self.github_repo_link.setObjectName("repositoryLink")
+        self.github_repo_link.setOpenExternalLinks(True)
+        self.github_repo_link.setToolTip("在浏览器中打开项目主页")
+        update_grid.addWidget(self.github_repo_link, 1, 0)
         update_layout.addLayout(update_grid)
-        self.github_auto_check = QCheckBox("启动后自动检查更新")
+        self.github_auto_check = QCheckBox("启动时自动检查更新（已启用）")
+        self.github_auto_check.setChecked(True)
+        self.github_auto_check.setEnabled(False)
         update_layout.addWidget(self.github_auto_check)
         update_actions = QHBoxLayout()
         self.check_update_button = QPushButton("手动检查更新")
@@ -719,7 +831,7 @@ class MainWindow(QMainWindow):
         update_actions.addWidget(self.open_release_button)
         update_actions.addStretch(1)
         update_layout.addLayout(update_actions)
-        self.update_status = QLabel("尚未检查。填写仓库后可手动检查。")
+        self.update_status = QLabel("启动后会自动检查当前项目的 Latest Release。")
         self.update_status.setObjectName("cardHint")
         self.update_status.setWordWrap(True)
         update_layout.addWidget(self.update_status)
@@ -852,9 +964,18 @@ class MainWindow(QMainWindow):
 
     def _sync_target_mode_controls(self) -> None:
         is_window_mode = self.target_mode_combo.currentData() == "window"
-        self.target_window_combo.setEnabled(is_window_mode)
-        self.refresh_windows_button.setEnabled(is_window_mode)
-        self.window_backend_combo.setEnabled(is_window_mode)
+        self.backend_options_panel.setProperty("modeActive", is_window_mode)
+        self.backend_options_panel.setEnabled(is_window_mode)
+        self.backend_mode_badge.setText(
+            "● 后台设置已启用" if is_window_mode else "○ 当前为屏幕坐标模式"
+        )
+        for widget in [
+            self.backend_options_panel,
+            *self.backend_options_panel.findChildren(QWidget),
+        ]:
+            widget.style().unpolish(widget)
+            widget.style().polish(widget)
+            widget.update()
         if is_window_mode:
             target = self.target_window_combo.currentData()
             if isinstance(target, window_target.WindowInfo):
@@ -869,14 +990,14 @@ class MainWindow(QMainWindow):
                 selection = "未检测到“瑪奇 Mobile”，请从下拉列表选择游戏窗口。"
             backend = str(self.window_backend_combo.currentData())
             engine_text = (
-                "OK 后台引擎：由 ok-script 提供 WGC 截图与 WM_ACTIVATE + PostMessage；"
+                "OK 后台引擎：由 ok-script 提供 WGC 截图、虚拟悬停与 WM_ACTIVATE + PostMessage；"
                 if backend == "ok"
                 else "兼容引擎：使用 PrintWindow 截图与 WM_ACTIVATE + PostMessage；"
             )
             self.target_mode_status.setText(
                 engine_text
-                + "Space / W / S 只发送至这个窗口。请保持洛奇 M 窗口未最小化；"
-                "若游戏忽略后台消息，监测会暂停且不会把按键发往当前前台程序。"
+                + "Space / W / S 和虚拟悬停只发送至这个窗口，真实鼠标可自由操作其他程序。"
+                "请保持洛奇 M 窗口未最小化；若后台消息失败，监测会暂停。"
                 + selection
             )
         else:
@@ -887,6 +1008,7 @@ class MainWindow(QMainWindow):
     def _target_mode_changed(self) -> None:
         self._sync_target_mode_controls()
         self._save_profile()
+
     def _load_config(self, config: AppConfig) -> None:
         controls = [
             self.monitor_combo,
@@ -902,13 +1024,15 @@ class MainWindow(QMainWindow):
             self.trigger_spin,
             self.clear_spin,
             self.cooldown_spin,
+            self.catch_strategy_combo,
+            self.fallback_delay_spin,
+            self.stamina_zoom_spin,
             self.auto_resume_check,
             self.auto_recover_check,
             self.idle_min_spin,
             self.idle_max_spin,
             self.recovery_hold_spin,
             self.recovery_cooldown_spin,
-            self.github_repo_edit,
             self.github_auto_check,
         ]
         blockers = [QSignalBlocker(control) for control in controls]
@@ -925,16 +1049,19 @@ class MainWindow(QMainWindow):
         self.trigger_spin.setValue(config.trigger_consecutive_frames)
         self.clear_spin.setValue(config.clear_consecutive_frames)
         self.cooldown_spin.setValue(config.press_cooldown_ms)
+        self._select_combo_data(self.catch_strategy_combo, config.catch_strategy)
+        self.fallback_delay_spin.setValue(config.fallback_collect_delay_seconds)
+        self.stamina_zoom_spin.setValue(config.stamina_zoom_in_steps)
         self.auto_resume_check.setChecked(config.auto_resume_fishing)
         self.auto_recover_check.setChecked(config.auto_recover_idle)
         self.idle_min_spin.setValue(config.idle_red_pixel_min)
         self.idle_max_spin.setValue(config.idle_red_pixel_max)
         self.recovery_hold_spin.setValue(config.recovery_key_hold_ms)
         self.recovery_cooldown_spin.setValue(config.recovery_cooldown_ms)
-        self.github_repo_edit.setText(config.github_repository)
-        self.github_auto_check.setChecked(config.github_auto_check)
+        self.github_auto_check.setChecked(True)
         del blockers
         self._sync_target_mode_controls()
+        self._sync_catch_strategy_controls()
         self._refresh_threshold_display(config.fish_red_pixel_threshold)
     def _connect_controls(self) -> None:
         self.monitor_combo.currentIndexChanged.connect(self._save_profile)
@@ -963,6 +1090,13 @@ class MainWindow(QMainWindow):
         self.cooldown_spin.valueChanged.connect(
             lambda value: self.engine.update_config(press_cooldown_ms=value)
         )
+        self.catch_strategy_combo.currentIndexChanged.connect(self._catch_strategy_changed)
+        self.fallback_delay_spin.valueChanged.connect(
+            lambda value: self.engine.update_config(fallback_collect_delay_seconds=value)
+        )
+        self.stamina_zoom_spin.valueChanged.connect(
+            lambda value: self.engine.update_config(stamina_zoom_in_steps=value)
+        )
         self.auto_resume_check.toggled.connect(
             lambda checked: self.engine.update_config(auto_resume_fishing=checked)
         )
@@ -982,12 +1116,40 @@ class MainWindow(QMainWindow):
             lambda value: self.engine.update_config(recovery_cooldown_ms=value)
         )
         self.restore_button.clicked.connect(self._restore_recommended_settings)
-        self.github_repo_edit.editingFinished.connect(self._save_update_preferences)
-        self.github_auto_check.toggled.connect(self._save_update_preferences)
+
         self.check_update_button.clicked.connect(lambda: self._check_for_updates(manual=True))
         self.open_release_button.clicked.connect(self._open_release_page)
         self.create_bundle_button.clicked.connect(self._create_diagnostic_bundle)
         self.open_log_button.clicked.connect(self._open_log_directory)
+    def _catch_strategy_changed(self) -> None:
+        self.engine.update_config(catch_strategy=str(self.catch_strategy_combo.currentData()))
+        self._sync_catch_strategy_controls()
+
+    def _sync_catch_strategy_controls(self) -> None:
+        strategy = str(self.catch_strategy_combo.currentData())
+        stack_index = {"stamina_bounce": 0, "fixed_delay": 1, "instant": 2}.get(strategy, 0)
+        self.catch_option_stack.setCurrentIndex(stack_index)
+        hints = {
+            "stamina_bounce": "模式 1（实验性功能，不稳定）：首次下降穿过半条不会收杆；必须反弹并第二次穿过半条。若识别失败后出现跑鱼提示，会学习本轮耗时并在下一轮提前 1–2 秒兜底。",
+            "fixed_delay": "模式 2：不分析体力条，上钩后按设定秒数收鱼。用于体力条无法稳定识别的场景。",
+            "instant": "模式 3：只要识别到上钩鱼图标，立即按 Space 收杆。",
+        }
+        self.catch_strategy_hint.setText(hints.get(strategy, hints["stamina_bounce"]))
+        self._sync_learned_escape_status()
+
+    def _sync_learned_escape_status(self) -> None:
+        learned = self.engine.config().learned_escape_seconds
+        if learned <= 0:
+            self.learned_escape_label.setText(
+                "跑鱼计时：尚未学习。识别到“讓牠跑掉了”后会自动记录本轮耗时。"
+            )
+            return
+        target, margin = FishingEngine.learned_collect_timing(learned)
+        self.learned_escape_label.setText(
+            f"跑鱼计时：上次 {learned:.1f} 秒；识别仍失败时将在 "
+            f"{target:.1f} 秒兜底（提前 {margin:.1f} 秒）。"
+        )
+
     def _save_profile(self) -> None:
         config = self.engine.config()
         target = self.target_window_combo.currentData()
@@ -1008,8 +1170,8 @@ class MainWindow(QMainWindow):
         self._sync_target_mode_controls()
         self._refresh_calibration_summary()
     def _calibrate(self) -> None:
-        self.engine.calibrate_from_cursor()
-        self._refresh_calibration_summary()
+        self.calibration_summary.setText("校准待命：将鼠标停在钓鱼按钮正中心后按 F7，当前位置会立即记录，鼠标不会移动。")
+        self._append_log("校准说明已显示：请把鼠标停在钓鱼按钮中心后按 F7；不要点击助手窗口来记录坐标。", EventKind.INFO)
 
     def _toggle_monitoring(self) -> None:
         self.engine.set_monitoring(not self.engine.is_monitoring())
@@ -1037,20 +1199,22 @@ class MainWindow(QMainWindow):
             recovery_pause_ms=defaults.recovery_pause_ms,
             recovery_cooldown_ms=defaults.recovery_cooldown_ms,
             recast_delay_ms=defaults.recast_delay_ms,
+            catch_strategy=defaults.catch_strategy,
+            fallback_collect_delay_seconds=defaults.fallback_collect_delay_seconds,
+            stamina_scan_interval_ms=defaults.stamina_scan_interval_ms,
+            stamina_zoom_in_steps=defaults.stamina_zoom_in_steps,
         )
         self._load_config(self.engine.config())
         self._append_log("已恢复推荐识别参数。", EventKind.INFO)
 
     def begin_startup_services(self) -> None:
-        """在启动页结束后再读取一次硬件，并按用户设置检查更新。"""
+        """启动页结束后读取一次硬件，并自动检查固定的项目 Release。"""
         threading.Thread(
             target=self._collect_system_profile_async,
             name="system-profile",
             daemon=True,
         ).start()
-        config = self.engine.config()
-        if config.github_auto_check and config.github_repository.strip():
-            self._check_for_updates(manual=False)
+        self._check_for_updates(manual=False)
 
     def _collect_system_profile_async(self) -> None:
         try:
@@ -1073,16 +1237,13 @@ class MainWindow(QMainWindow):
 
     def _save_update_preferences(self) -> None:
         self.engine.update_config(
-            github_repository=self.github_repo_edit.text().strip(),
-            github_auto_check=self.github_auto_check.isChecked(),
+            github_repository=GITHUB_REPOSITORY,
+            github_auto_check=True,
         )
 
     def _check_for_updates(self, *, manual: bool) -> None:
         self._save_update_preferences()
-        repository = self.github_repo_edit.text().strip()
-        if not repository:
-            self.update_status.setText("请先填写 GitHub 仓库（格式：owner/repository）。")
-            return
+        repository = GITHUB_REPOSITORY
         self.check_update_button.setEnabled(False)
         self.update_status.setText("正在检查 GitHub Latest Release…")
 
@@ -1157,7 +1318,7 @@ class MainWindow(QMainWindow):
             )
         else:
             if config.button_center is None:
-                self.calibration_summary.setText("尚未校准。请把鼠标停在圆形按钮中心后操作。")
+                self.calibration_summary.setText("尚未校准。请把鼠标停在圆形按钮中心后按 F7；记录时鼠标不会移动。")
                 return
             x, y = config.button_center
             self.calibration_summary.setText(
@@ -1175,9 +1336,28 @@ class MainWindow(QMainWindow):
             maximum = max(1, self.engine.config().fish_red_pixel_threshold)
             self.red_progress.setMaximum(maximum)
             self.red_progress.setValue(min(event.red_pixels, maximum))
+            if event.waiting_for_bounce:
+                if event.catch_strategy == "fixed_delay":
+                    total = max(1, self.engine.config().fallback_collect_delay_seconds)
+                    percent = min(100, round(event.hook_elapsed_seconds / total * 100))
+                    self.stamina_metric.value_label.setText(
+                        f"{event.hook_elapsed_seconds:.1f} / {total} 秒"
+                    )
+                    self.stamina_progress.setValue(percent)
+                elif event.stamina_peak_width:
+                    percent = min(100, round(event.stamina_fill_width / event.stamina_peak_width * 100))
+                    self.stamina_metric.value_label.setText(f"{percent}% · {event.stamina_fill_width} px")
+                    self.stamina_progress.setValue(percent)
+                else:
+                    self.stamina_metric.value_label.setText("扫描中")
+                    self.stamina_progress.setValue(0)
+            else:
+                self.stamina_metric.value_label.setText("等待上钩")
+                self.stamina_progress.setValue(0)
             self.runtime_detail.setText(event.message)
             return
 
+        self._sync_learned_escape_status()
         self._append_log(event.message, event.kind)
         if event.kind == EventKind.STATE:
             if event.monitoring:
