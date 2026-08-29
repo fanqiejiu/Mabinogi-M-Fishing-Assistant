@@ -15,6 +15,8 @@ import numpy as np
 import pyautogui
 from pynput import keyboard
 
+from . import window_target
+
 from .config import DEBUG_IMAGE_PATH, AppConfig, load_config, save_config
 from .diagnostics import record_error
 
@@ -106,24 +108,61 @@ class FishingEngine:
 
     def calibrate_from_cursor(self) -> tuple[int, int]:
         x, y = pyautogui.position()
-        self.update_config(button_center=(x, y))
+        config = self.config()
+        if config.capture_mode == "window":
+            try:
+                target = self._resolve_target_window(config)
+            except RuntimeError as error:
+                self._emit(EventKind.WARNING, f"后台模式校准失败：{error}")
+                return x, y
+            if not target.contains(x, y):
+                self._emit(
+                    EventKind.WARNING,
+                    "鼠标不在选定的目标窗口内，请先切到目标窗口再校准。",
+                )
+                return x, y
+            offset = (x - target.left, y - target.top)
+            self.update_config(
+                button_center=(x, y),
+                target_window_handle=target.handle,
+                target_window_title=target.title,
+                target_button_offset=offset,
+            )
+            message = f"已校准目标窗口“{target.title}”内按钮：({offset[0]}, {offset[1]})。"
+        else:
+            self.update_config(button_center=(x, y))
+            message = f"已校准钓鱼按钮中心：({x}, {y})。"
         self._reset_detection()
-        self._emit(EventKind.SUCCESS, f"已校准钓鱼按钮中心：({x}, {y})。")
+        self._emit(EventKind.SUCCESS, message)
         return x, y
-
     def set_monitoring(self, enabled: bool) -> bool:
-        if enabled and self.config().button_center is None:
-            self._emit(EventKind.WARNING, "请先把鼠标放在圆形按钮中心，再点击校准。")
-            return False
+        config = self.config()
+        if enabled:
+            if config.capture_mode == "window":
+                if config.target_button_offset is None:
+                    self._emit(EventKind.WARNING, "请先选择目标窗口并在窗口内完成校准。")
+                    return False
+                try:
+                    self._resolve_target_window(config)
+                except RuntimeError as error:
+                    self._emit(EventKind.WARNING, f"无法启动后台模式：{error}")
+                    return False
+            elif config.button_center is None:
+                self._emit(EventKind.WARNING, "请先把鼠标放在圆形按钮中心，再点击校准。")
+                return False
         self._reset_detection()
         if enabled:
             self._enabled.set()
-            self._emit(EventKind.STATE, "监测已启动，请把游戏保持在前台。", monitoring=True)
+            message = (
+                "实验性指定窗口模式已启动；若截图或定向按键不兼容会自动暂停。"
+                if config.capture_mode == "window"
+                else "监测已启动，请把游戏保持在前台。"
+            )
+            self._emit(EventKind.STATE, message, monitoring=True)
         else:
             self._enabled.clear()
             self._emit(EventKind.STATE, "监测已暂停，不会发送按键。", monitoring=False)
         return True
-
     def toggle_monitoring(self) -> None:
         self.set_monitoring(not self._enabled.is_set())
 
@@ -132,12 +171,19 @@ class FishingEngine:
 
     def save_debug_capture(self) -> Path | None:
         config = self.config()
-        if config.button_center is None:
+        if config.capture_mode == "window":
+            missing_calibration = config.target_button_offset is None
+        else:
+            missing_calibration = config.button_center is None
+        if missing_calibration:
             self._emit(EventKind.WARNING, "请先完成校准，才能保存识别区域。")
             return None
         try:
-            with mss.MSS() as screen:
-                frame = np.asarray(screen.grab(self._capture_region(config)))
+            if config.capture_mode == "window":
+                frame = self._capture_frame(None, config)
+            else:
+                with mss.MSS() as screen:
+                    frame = self._capture_frame(screen, config)
             cv2.imwrite(str(DEBUG_IMAGE_PATH), frame[:, :, :3])
         except Exception as error:  # pragma: no cover - 依赖实际显示器状态
             self._emit(EventKind.ERROR, f"保存识别区域失败：{error}")
@@ -148,7 +194,6 @@ class FishingEngine:
             debug_image=DEBUG_IMAGE_PATH,
         )
         return DEBUG_IMAGE_PATH
-
     @staticmethod
     def count_fish_red_pixels(bgr: np.ndarray) -> int:
         """只统计圆形按钮内的红橙色像素，排除附近 UI 的干扰。"""
@@ -199,27 +244,64 @@ class FishingEngine:
         return None
 
     def _monitor_loop(self) -> None:
+        screen: mss.MSS | None = None
         try:
-            with mss.MSS() as screen:
-                while not self._shutdown.is_set():
-                    if not self._enabled.wait(timeout=0.15):
-                        continue
+            while not self._shutdown.is_set():
+                if not self._enabled.wait(timeout=0.15):
+                    continue
 
-                    config = self.config()
-                    if config.button_center is None:
-                        self.set_monitoring(False)
-                        continue
-                    try:
-                        frame = np.asarray(screen.grab(self._capture_region(config)))
-                        red_pixels = self.count_fish_red_pixels(frame[:, :, :3])
-                        self._process_frame(red_pixels, config)
-                    except Exception as error:  # pragma: no cover - 显示器环境差异
-                        self._enabled.clear()
-                        self._emit(EventKind.ERROR, f"屏幕识别已暂停：{error}")
-                    time.sleep(config.poll_interval_ms / 1000)
+                config = self.config()
+                if config.capture_mode == "window":
+                    missing_calibration = config.target_button_offset is None
+                else:
+                    missing_calibration = config.button_center is None
+                if missing_calibration:
+                    self.set_monitoring(False)
+                    continue
+                try:
+                    if config.capture_mode == "screen" and screen is None:
+                        screen = mss.MSS()
+                    frame = self._capture_frame(screen, config)
+                    red_pixels = self.count_fish_red_pixels(frame[:, :, :3])
+                    self._process_frame(red_pixels, config)
+                except Exception as error:  # pragma: no cover - 显示器环境差异
+                    self._enabled.clear()
+                    source = "目标窗口" if config.capture_mode == "window" else "屏幕识别"
+                    self._emit(EventKind.ERROR, f"{source}已暂停：{error}")
+                time.sleep(config.poll_interval_ms / 1000)
         except Exception as error:  # pragma: no cover - mss 初始化失败
-            self._emit(EventKind.ERROR, f"无法启动屏幕识别服务：{error}")
+            self._emit(EventKind.ERROR, f"无法启动识别服务：{error}")
+        finally:
+            if screen is not None:
+                screen.close()
 
+    def _capture_frame(self, screen: mss.MSS | None, config: AppConfig) -> np.ndarray:
+        if config.capture_mode == "window":
+            if config.target_button_offset is None:
+                raise RuntimeError("目标窗口尚未完成按钮校准。")
+            target = self._resolve_target_window(config)
+            return window_target.capture_window_region(
+                target.handle,
+                config.target_button_offset,
+                config.roi_width,
+                config.roi_height,
+            )
+        if screen is None:
+            raise RuntimeError("屏幕截图服务未初始化。")
+        return np.asarray(screen.grab(self._capture_region(config)))
+
+    def _resolve_target_window(self, config: AppConfig) -> window_target.WindowInfo:
+        target = window_target.resolve_window(
+            config.target_window_handle, config.target_window_title
+        )
+        if target is None:
+            raise RuntimeError("找不到已选窗口；请刷新列表并重新选择。")
+        if target.handle != config.target_window_handle:
+            self.update_config(
+                target_window_handle=target.handle,
+                target_window_title=target.title,
+            )
+        return target
     def _process_frame(self, red_pixels: int, config: AppConfig) -> None:
         icon_state = self.classify_icon_state(red_pixels, config)
         fish_visible = icon_state == IconState.FISH_HOOKED
@@ -245,7 +327,7 @@ class FishingEngine:
             self._red_frames >= config.trigger_consecutive_frames
             and now - self._last_press_at >= config.press_cooldown_ms / 1000
         ):
-            pyautogui.press("space")
+            self._press_key("space", config)
             self._last_press_at = now
             self._waiting_for_clear = True
             self._emit(
@@ -301,7 +383,7 @@ class FishingEngine:
             return
         if now - self._last_press_at < config.press_cooldown_ms / 1000:
             return
-        pyautogui.press("space")
+        self._press_key("space", config)
         self._last_press_at = now
         reason = self._pending_recast_reason
         self._pending_recast_at = None
@@ -312,19 +394,28 @@ class FishingEngine:
         """原地超时图标出现时，短按 W 再 S 刷新钓鱼状态。"""
         self._last_recovery_at = time.monotonic()
         self._idle_frames = 0
-        self._tap_key("w", config.recovery_key_hold_ms)
+        self._tap_key("w", config.recovery_key_hold_ms, config)
         time.sleep(config.recovery_pause_ms / 1000)
-        self._tap_key("s", config.recovery_key_hold_ms)
+        self._tap_key("s", config.recovery_key_hold_ms, config)
         self._emit(EventKind.SUCCESS, "检测到原地失效状态，已执行 W → S 移动恢复。", monitoring=True)
 
-    @staticmethod
-    def _tap_key(key: str, hold_ms: int) -> None:
+    def _press_key(self, key: str, config: AppConfig) -> None:
+        if config.capture_mode == "window":
+            target = self._resolve_target_window(config)
+            window_target.post_key_tap(target.handle, key)
+            return
+        pyautogui.press(key)
+
+    def _tap_key(self, key: str, hold_ms: int, config: AppConfig) -> None:
+        if config.capture_mode == "window":
+            target = self._resolve_target_window(config)
+            window_target.post_key_tap(target.handle, key, hold_ms)
+            return
         pyautogui.keyDown(key)
         try:
             time.sleep(hold_ms / 1000)
         finally:
             pyautogui.keyUp(key)
-
     @staticmethod
     def _capture_region(config: AppConfig) -> dict[str, int]:
         if config.button_center is None:

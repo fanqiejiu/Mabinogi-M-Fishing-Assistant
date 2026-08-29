@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 APP_NAME = "洛奇 M 钓鱼助手"
-APP_VERSION = "0.2.1"
+APP_VERSION = "0.3.0"
 APP_AUTHOR = "番茄啾"
 APP_DISPLAY_VERSION = f"{APP_VERSION} by {APP_AUTHOR}"
 

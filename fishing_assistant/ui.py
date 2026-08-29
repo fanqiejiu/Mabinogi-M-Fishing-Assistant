@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from . import window_target
 from .config import AppConfig, default_config
 from .constants import APP_AUTHOR, APP_DISPLAY_VERSION, APP_ICON_PATH, APP_NAME, APP_VERSION
 from .diagnostics import LOG_DIR, create_support_bundle, record_error, set_system_profile
@@ -349,6 +350,30 @@ class MainWindow(QMainWindow):
         key_value.setStyleSheet("font-size: 20px; padding: 8px 0;")
         form.addWidget(key_value, 3, 1)
         layout.addLayout(form)
+
+        target = QGridLayout()
+        target.setHorizontalSpacing(18)
+        target.setVerticalSpacing(10)
+        self.target_mode_combo = QComboBox()
+        self.target_mode_combo.addItem("屏幕坐标模式（稳定）", "screen")
+        self.target_mode_combo.addItem("指定窗口后台模式（实验性）", "window")
+        self.target_window_combo = QComboBox()
+        self.refresh_windows_button = QPushButton("刷新窗口")
+        target_window_row = QWidget()
+        target_window_layout = QHBoxLayout(target_window_row)
+        target_window_layout.setContentsMargins(0, 0, 0, 0)
+        target_window_layout.setSpacing(8)
+        target_window_layout.addWidget(self.target_window_combo, 1)
+        target_window_layout.addWidget(self.refresh_windows_button)
+        target.addWidget(self._form_label("捕捉与按键模式", "后台模式只向指定窗口投递按键"), 0, 0)
+        target.addWidget(self._form_label("后台目标窗口", "选中洛奇 M 的游戏主窗口"), 0, 1)
+        target.addWidget(self.target_mode_combo, 1, 0)
+        target.addWidget(target_window_row, 1, 1)
+        layout.addLayout(target)
+        self.target_mode_status = QLabel()
+        self.target_mode_status.setObjectName("cardHint")
+        self.target_mode_status.setWordWrap(True)
+        layout.addWidget(self.target_mode_status)
 
         divider = QFrame()
         divider.setFrameShape(QFrame.Shape.HLine)
@@ -759,12 +784,70 @@ class MainWindow(QMainWindow):
             self.monitor_combo.addItem("显示器 1", 1)
         self.resolution_combo.clear()
         self.resolution_combo.addItems(resolutions)
+        self._refresh_target_windows()
 
+    def _refresh_target_windows(self, *_: object) -> None:
+        config = self.engine.config()
+        current_handle = config.target_window_handle
+        current_title = config.target_window_title
+        blocker = QSignalBlocker(self.target_window_combo)
+        self.target_window_combo.clear()
+        try:
+            windows = window_target.list_target_windows()
+        except Exception as error:  # pragma: no cover - 由 Windows 会话状态决定
+            windows = []
+            self.target_mode_status.setText(f"无法读取窗口列表：{error}")
+        for target in windows:
+            if target.title == self.windowTitle():
+                continue
+            self.target_window_combo.addItem(
+                f"{target.title}  ·  {target.width} × {target.height}", target
+            )
+        if self.target_window_combo.count() == 0:
+            self.target_window_combo.addItem("未发现可选窗口，请打开洛奇 M 后刷新", None)
+        self._select_target_window(current_handle, current_title)
+        del blocker
+        self._sync_target_mode_controls()
+
+    def _select_target_window(self, handle: int, title: str) -> None:
+        for index in range(self.target_window_combo.count()):
+            target = self.target_window_combo.itemData(index)
+            if not isinstance(target, window_target.WindowInfo):
+                continue
+            if target.handle == handle or (title and target.title == title):
+                self.target_window_combo.setCurrentIndex(index)
+                return
+
+    def _sync_target_mode_controls(self) -> None:
+        is_window_mode = self.target_mode_combo.currentData() == "window"
+        self.target_window_combo.setEnabled(is_window_mode)
+        self.refresh_windows_button.setEnabled(is_window_mode)
+        if is_window_mode:
+            target = self.target_window_combo.currentData()
+            if isinstance(target, window_target.WindowInfo):
+                selection = f"当前目标：{target.title}。"
+            else:
+                selection = "尚未选择可用目标窗口。"
+            self.target_mode_status.setText(
+                "实验性后台模式：截图与 Space / W / S 只发送至这个窗口；"
+                "请保持洛奇 M 窗口未最小化。若游戏不支持后台截图或定向按键，监测会自动暂停。"
+                + selection
+            )
+        else:
+            self.target_mode_status.setText(
+                "稳定屏幕模式：识别与按键依赖洛奇 M 位于前台，不会在后台向其他窗口发送按键。"
+            )
+
+    def _target_mode_changed(self) -> None:
+        self._sync_target_mode_controls()
+        self._save_profile()
     def _load_config(self, config: AppConfig) -> None:
         controls = [
             self.monitor_combo,
             self.mode_combo,
             self.resolution_combo,
+            self.target_mode_combo,
+            self.target_window_combo,
             self.threshold_slider,
             self.roi_width_spin,
             self.roi_height_spin,
@@ -784,6 +867,8 @@ class MainWindow(QMainWindow):
         blockers = [QSignalBlocker(control) for control in controls]
         self._select_combo_data(self.monitor_combo, config.monitor_index)
         self._select_combo_data(self.mode_combo, config.display_mode)
+        self._select_combo_data(self.target_mode_combo, config.capture_mode)
+        self._select_target_window(config.target_window_handle, config.target_window_title)
         self._select_combo_text(self.resolution_combo, config.selected_resolution)
         self.threshold_slider.setValue(config.fish_red_pixel_threshold)
         self.roi_width_spin.setValue(config.roi_width)
@@ -801,12 +886,15 @@ class MainWindow(QMainWindow):
         self.github_repo_edit.setText(config.github_repository)
         self.github_auto_check.setChecked(config.github_auto_check)
         del blockers
+        self._sync_target_mode_controls()
         self._refresh_threshold_display(config.fish_red_pixel_threshold)
-
     def _connect_controls(self) -> None:
         self.monitor_combo.currentIndexChanged.connect(self._save_profile)
         self.mode_combo.currentIndexChanged.connect(self._save_profile)
         self.resolution_combo.currentIndexChanged.connect(self._save_profile)
+        self.target_mode_combo.currentIndexChanged.connect(self._target_mode_changed)
+        self.target_window_combo.currentIndexChanged.connect(self._save_profile)
+        self.refresh_windows_button.clicked.connect(self._refresh_target_windows)
         self.calibrate_button.clicked.connect(self._calibrate)
         self.start_button.clicked.connect(self._toggle_monitoring)
         self.snapshot_button.clicked.connect(self.engine.save_debug_capture)
@@ -851,15 +939,24 @@ class MainWindow(QMainWindow):
         self.open_release_button.clicked.connect(self._open_release_page)
         self.create_bundle_button.clicked.connect(self._create_diagnostic_bundle)
         self.open_log_button.clicked.connect(self._open_log_directory)
-
     def _save_profile(self) -> None:
+        config = self.engine.config()
+        target = self.target_window_combo.currentData()
+        target_handle = config.target_window_handle
+        target_title = config.target_window_title
+        if isinstance(target, window_target.WindowInfo):
+            target_handle = target.handle
+            target_title = target.title
         self.engine.update_config(
             monitor_index=int(self.monitor_combo.currentData() or 1),
             display_mode=str(self.mode_combo.currentData()),
             selected_resolution=self.resolution_combo.currentText(),
+            capture_mode=str(self.target_mode_combo.currentData()),
+            target_window_handle=target_handle,
+            target_window_title=target_title,
         )
+        self._sync_target_mode_controls()
         self._refresh_calibration_summary()
-
     def _calibrate(self) -> None:
         self.engine.calibrate_from_cursor()
         self._refresh_calibration_summary()
@@ -1000,16 +1097,24 @@ class MainWindow(QMainWindow):
 
     def _refresh_calibration_summary(self) -> None:
         config = self.engine.config()
-        if config.button_center is None:
-            self.calibration_summary.setText("尚未校准。请把鼠标停在圆形按钮中心后操作。")
-            return
-        x, y = config.button_center
-        self.calibration_summary.setText(
-            f"已校准：({x}, {y})  ·  {config.selected_resolution}  ·  {self._mode_name(config.display_mode)}"
-        )
+        if config.capture_mode == "window":
+            if config.target_button_offset is None:
+                self.calibration_summary.setText("后台模式尚未校准。选择洛奇 M 窗口后，将鼠标放在按钮中心并校准。")
+                return
+            offset_x, offset_y = config.target_button_offset
+            self.calibration_summary.setText(
+                f"已校准后台目标：{config.target_window_title or '未命名窗口'}  ·  窗口内 ({offset_x}, {offset_y})"
+            )
+        else:
+            if config.button_center is None:
+                self.calibration_summary.setText("尚未校准。请把鼠标停在圆形按钮中心后操作。")
+                return
+            x, y = config.button_center
+            self.calibration_summary.setText(
+                f"已校准：({x}, {y})  ·  {config.selected_resolution}  ·  {self._mode_name(config.display_mode)}"
+            )
         if not self.engine.is_monitoring():
             self._set_status("idle", "●  已校准，待启动")
-
     def _refresh_threshold_display(self, threshold: int) -> None:
         self.threshold_value.setText(f"{threshold} px")
         self.red_progress.setMaximum(max(1, threshold))
@@ -1027,7 +1132,11 @@ class MainWindow(QMainWindow):
         if event.kind == EventKind.STATE:
             if event.monitoring:
                 self.runtime_title.setText("监测中")
-                self.runtime_detail.setText("正在识别右下角圆形按钮。")
+                self.runtime_detail.setText(
+                    "正在识别指定窗口区域（实验性后台模式）。"
+                    if self.engine.config().capture_mode == "window"
+                    else "正在识别右下角圆形按钮。"
+                )
                 self.start_button.setText("暂停监测")
                 self.start_button.setObjectName("dangerButton")
                 self.start_button.style().unpolish(self.start_button)

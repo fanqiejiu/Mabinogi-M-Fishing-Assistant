@@ -16,7 +16,7 @@ DEBUG_IMAGE_PATH = APP_DIR / "fishing_roi_debug.png"
 class AppConfig:
     """以后新增选项时，在此处加入字段即可自动兼容旧配置文件。"""
 
-    schema_version: int = 4
+    schema_version: int = 5
     button_center: tuple[int, int] | None = None
     monitor_index: int = 1
     display_mode: str = "borderless"
@@ -39,6 +39,11 @@ class AppConfig:
     recovery_pause_ms: int = 120
     recovery_cooldown_ms: int = 4500
     recast_delay_ms: int = 650
+    # screen：当前稳定模式；window：指定窗口后台模式（实验性）。
+    capture_mode: str = "screen"
+    target_window_handle: int = 0
+    target_window_title: str = ""
+    target_button_offset: tuple[int, int] | None = None
     # 默认只用于手动检查；用户可在设置中修改或启用启动时自动检查。
     github_repository: str = "fanqiejiu/Mabinogi-M-Fishing-Assistant"
     github_auto_check: bool = False
@@ -65,11 +70,15 @@ def load_config() -> AppConfig:
         raw["schema_version"] = 3
     if int(raw.get("schema_version", 0)) < 4:
         raw["schema_version"] = 4
+    if int(raw.get("schema_version", 0)) < 5:
+        raw["schema_version"] = 5
 
     valid_names = {field.name for field in fields(AppConfig)}
     values = {name: value for name, value in raw.items() if name in valid_names}
     if values.get("button_center") is not None:
         values["button_center"] = tuple(values["button_center"])
+    if values.get("target_button_offset") is not None:
+        values["target_button_offset"] = tuple(values["target_button_offset"])
     try:
         return AppConfig(**values)
     except TypeError:
@@ -80,6 +89,8 @@ def save_config(config: AppConfig) -> None:
     data = asdict(config)
     if config.button_center is not None:
         data["button_center"] = list(config.button_center)
+    if config.target_button_offset is not None:
+        data["target_button_offset"] = list(config.target_button_offset)
     temporary_path = CONFIG_PATH.with_suffix(".tmp")
     temporary_path.write_text(
         json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
