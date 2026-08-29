@@ -38,7 +38,7 @@
 
 ### 直接运行
 
-在 [Releases](https://github.com/fanqiejiu/Mabinogi-M-Fishing-Assistant/releases) 下载 `MabinogiFishingHelper.exe`，解压后直接运行。
+在 [Releases](https://github.com/fanqiejiu/Mabinogi-M-Fishing-Assistant/releases) 下载 `ok-MabinogiFishing.exe`，解压后直接运行。
 
 首次启动会短暂显示项目图标和版本号。配置、日志和诊断包均保存在本机。
 
@@ -101,16 +101,16 @@ cd Mabinogi-M-Fishing-Assistant
 .\build.bat
 ```
 
-打包结果为 `dist\MabinogiFishingHelper.exe`。EXE 包含 Qt、OpenCV 与 OK 框架依赖，建议作为 Release 附件，不要提交到源码仓库。
+打包结果为 `dist\ok-MabinogiFishing.exe`。EXE 包含 Qt、OpenCV 与 OK 框架依赖，建议作为 Release 附件，不要提交到源码仓库。
 
 ## 0.4.0 更新说明
 
-- 后台模式切换为 OK 框架窗口后端：WGC 截图 + `WM_ACTIVATE + PostMessage`。
-- 新增 OK / PrintWindow 后端选择，方便排查兼容性。
-- 优先自动识别“瑪奇 Mobile”窗口；无匹配时可手动选择。
-- 增加骑马、下马和原地失效纠错。
-- 后台识别异常会同步为“已暂停”，不再只显示“检测中”。
-- 更新项目说明、打包依赖和第三方声明。
+1. 后台模式切换为 OK 框架窗口后端：WGC 截图 + `WM_ACTIVATE + PostMessage`。
+2. 新增 OK / PrintWindow 后端选择，方便排查兼容性。
+3. 优先自动识别“瑪奇 Mobile”窗口；无匹配时可手动选择。
+4. 增加骑马、下马和原地失效纠错。
+5. 后台识别异常会同步为“已暂停”，不再只显示“检测中”。
+
 
 ## 许可证
 
