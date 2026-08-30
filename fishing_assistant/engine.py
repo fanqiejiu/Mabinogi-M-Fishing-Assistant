@@ -24,6 +24,8 @@ from .constants import (
     INVENTORY_FULL_ICON_TEMPLATE_PATH,
     INVENTORY_FULL_TEMPLATE_PATH,
     OK_ICON_TEMPLATE_PATHS,
+    OK_IDLE_MOTION_TEMPLATE_PATH,
+    OK_STAMINA_ANCHOR_TEMPLATE_PATH,
     ROD_REQUIRED_TEMPLATE_PATH,
 )
 from .diagnostics import record_error
@@ -67,6 +69,7 @@ class StaminaBarSample:
 
     fill_width: int
     center: tuple[int, int]
+    anchor_confidence: float = 1.0
 
 
 @dataclass(slots=True)
@@ -98,9 +101,17 @@ class FishingEngine:
     CAST_TRANSITION_GRACE_SECONDS = 1.5
     OK_ICON_MATCH_THRESHOLD = 0.86
     OK_ICON_MATCH_MARGIN = 0.04
-    OK_IDLE_ROTATED_MATCH_THRESHOLD = 0.79
+    OK_IDLE_ROTATED_MATCH_THRESHOLD = 0.82
     OK_IDLE_ROTATED_MATCH_MARGIN = 0.025
+    # 实机 WGC 画面中的指南针会因缩放与背景导致整图分数降到约 0.45～0.55。
+    # 只有整图先成为候选，再由旋转不变的中心黑点锚点复核，避免误认其他圆形按钮。
+    OK_IDLE_CORRECTED_MATCH_THRESHOLD = 0.42
+    OK_IDLE_CORRECTED_MATCH_MARGIN = 0.06
+    OK_IDLE_CENTER_MATCH_THRESHOLD = 0.74
     OK_ICON_NORMALIZED_WIDTH = 160
+    COMPASS_PIXEL_MATCH_THRESHOLD = 0.50
+    STAMINA_ANCHOR_MATCH_THRESHOLD = 0.80
+    STAMINA_LOST_GRACE_SECONDS = 0.75
     STARTUP_IDLE_CONFIRM_FRAMES = 2
     ROD_REQUIRED_MATCH_THRESHOLD = 0.72
     INVENTORY_FULL_MATCH_THRESHOLD = 0.70
@@ -115,6 +126,8 @@ class FishingEngine:
     _ok_feature_set: FeatureSet | None = None
     _ok_icon_templates: dict[str, np.ndarray] | None = None
     _ok_idle_rotated_templates: tuple[np.ndarray, ...] | None = None
+    _ok_idle_center_template: np.ndarray | None = None
+    _stamina_anchor_template: np.ndarray | None = None
 
     def __init__(self, event_callback: EventCallback | None = None) -> None:
         self._config = load_config()
@@ -151,6 +164,8 @@ class FishingEngine:
         self._stamina_bar_seen = False
         self._stamina_sample_count = 0
         self._last_stamina_observation_log_at = 0.0
+        self._last_stamina_seen_at = 0.0
+        self._stamina_last_center: tuple[int, int] | None = None
 
         self._escape_watch_until = 0.0
         self._escape_candidate_elapsed = 0.0
@@ -318,6 +333,7 @@ class FishingEngine:
             debug_image=DEBUG_IMAGE_PATH,
         )
         return DEBUG_IMAGE_PATH
+
     @staticmethod
     def _icon_circle_mask(height: int, width: int) -> np.ndarray:
         mask = np.zeros((height, width), dtype=np.uint8)
@@ -365,6 +381,65 @@ class FishingEngine:
         )
 
     @classmethod
+    def compass_pixel_confidence(cls, bgr: np.ndarray) -> float:
+        """在按钮中心附近搜索旋转不变的黑色圆点，并以指针配色复核。"""
+        if bgr.ndim != 3 or bgr.shape[0] < 20 or bgr.shape[1] < 20:
+            return 0.0
+        cropped = cls._crop_ok_icon_image(bgr[:, :, :3])
+        normalized = cv2.resize(cropped, (128, 128), interpolation=cv2.INTER_AREA)
+        hsv = cv2.cvtColor(normalized, cv2.COLOR_BGR2HSV)
+        hue, saturation, value = cv2.split(hsv)
+
+        black_mask = (value <= 45).astype(np.uint8)
+        count, _labels, stats, centroids = cv2.connectedComponentsWithStats(
+            black_mask, 8
+        )
+        best_dot_area = 0
+        for component in range(1, count):
+            x, y, width, height, area = (
+                int(item) for item in stats[component, :5]
+            )
+            center_x, center_y = (float(item) for item in centroids[component])
+            fill_ratio = area / max(1, width * height)
+            aspect_ratio = width / max(1, height)
+            if (
+                35 <= center_x <= 93
+                and 35 <= center_y <= 93
+                and 60 <= area <= 320
+                and 8 <= width <= 26
+                and 8 <= height <= 26
+                and 0.50 <= fill_ratio <= 1.0
+                and 0.55 <= aspect_ratio <= 1.80
+            ):
+                best_dot_area = max(best_dot_area, area)
+
+        red_ratio = float(
+            (
+                ((hue <= 12) | (hue >= 170))
+                & (saturation >= 90)
+                & (value >= 90)
+            ).mean()
+        )
+        white_ratio = float(((saturation <= 45) & (value >= 180)).mean())
+        green_ratio = float(
+            (
+                (hue >= 35)
+                & (hue <= 100)
+                & (saturation >= 55)
+                & (value >= 70)
+            ).mean()
+        )
+        dot_confidence = min(1.0, best_dot_area / 120)
+        if (
+            dot_confidence >= cls.COMPASS_PIXEL_MATCH_THRESHOLD
+            and 0.008 <= red_ratio <= 0.045
+            and 0.035 <= white_ratio <= 0.16
+            and 0.15 <= green_ratio <= 0.52
+        ):
+            return dot_confidence
+        return 0.0
+
+    @classmethod
     def count_fish_red_pixels(cls, bgr: np.ndarray) -> int:
         """兼容既有调用：只返回圆形按钮内的红橙色像素数。"""
         return cls.analyze_icon_colors(bgr).red_pixels
@@ -384,10 +459,17 @@ class FishingEngine:
     def classify_frame_state(
         cls, bgr: np.ndarray, config: AppConfig
     ) -> tuple[IconState, IconColorSignals]:
-        """根据用户选择独立运行 OK 特征或旧像素识别。"""
+        """运行所选识别后端；OK 模式仅对旋转指南针使用专用像素校正。"""
         if config.recognition_backend != "pixel":
-            # OK 模式是独立识别方案；不计算旧像素信号，也绝不调用像素规则。
+            # 指南针会持续旋转，先用中心黑点与固定配色判定；其他图标仍交给 OK。
             signals = IconColorSignals(0, 0.0, 0.0, 0.0, 0.0, 0.0)
+            compass_confidence = cls.compass_pixel_confidence(bgr)
+            if compass_confidence:
+                return IconState.IDLE_RECOVERY, replace(
+                    signals,
+                    recognition_source="compass_pixel",
+                    recognition_confidence=compass_confidence,
+                )
             try:
                 state, best_confidence, _second_confidence = (
                     cls.ok_icon_state_match(bgr)
@@ -431,9 +513,60 @@ class FishingEngine:
             state = IconState.WAITING_BITE
         return state, signals
 
-    @staticmethod
-    def find_stamina_bar(bgr: np.ndarray) -> StaminaBarSample | None:
-        """在完整游戏画面中寻找细长的绿色体力条填充，不读取文字内容。"""
+    @classmethod
+    def _load_stamina_anchor_template(cls) -> np.ndarray | None:
+        if cls._stamina_anchor_template is None:
+            cls._stamina_anchor_template = cv2.imread(
+                str(OK_STAMINA_ANCHOR_TEMPLATE_PATH), cv2.IMREAD_COLOR
+            )
+        return cls._stamina_anchor_template
+
+    @classmethod
+    def _stamina_anchor_confidence(
+        cls,
+        bgr: np.ndarray,
+        x: int,
+        y: int,
+        width: int,
+        height: int,
+    ) -> float:
+        """在绿条上方用 OK 彩色特征确认随角色移动的中鱼圆形图标。"""
+        template = cls._load_stamina_anchor_template()
+        if template is None:
+            return 0.0
+        frame_height, frame_width = bgr.shape[:2]
+        horizontal_span = max(140, min(420, width * 4))
+        vertical_span = max(80, min(240, height * 8))
+        left = max(0, x - round(horizontal_span * 0.25))
+        right = min(frame_width, x + horizontal_span)
+        top = max(0, y - vertical_span)
+        bottom = min(frame_height, y + max(2, height // 3))
+        if right - left < 20 or bottom - top < 20:
+            return 0.0
+        search = bgr[top:bottom, left:right, :3]
+        return cls._ok_multiscale_confidence(
+            search,
+            template,
+            search_top_ratio=0.0,
+            search_bottom_ratio=1.0,
+            scales=np.array(
+                [0.65, 0.75, 0.85, 0.90, 0.95, 1.00, 1.05, 1.10, 1.20, 1.35, 1.55]
+            ),
+            normalized_width=search.shape[1],
+            baseline_scale=1.0,
+            category_name="stamina_fish_anchor",
+            use_gray_scale=False,
+        )
+
+    @classmethod
+    def find_stamina_bar(
+        cls,
+        bgr: np.ndarray,
+        *,
+        require_anchor: bool = False,
+        preferred_center: tuple[int, int] | None = None,
+    ) -> StaminaBarSample | None:
+        """全画面寻找绿条；实机模式再用其上方的中鱼图标作 OK 锚点确认。"""
         if bgr.ndim != 3 or bgr.shape[0] <= 0 or bgr.shape[1] <= 0:
             return None
         hsv = cv2.cvtColor(bgr[:, :, :3], cv2.COLOR_BGR2HSV)
@@ -446,8 +579,8 @@ class FishingEngine:
         count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(
             green_mask, connectivity=8
         )
-        # 目标条是“绿色填充 + 右侧深色空槽”的细长进度条；不能只选画面中部，
-        # 因为角色移动时它可能出现在任意位置。
+        # 绿条会跟随角色在整张画面中移动。先按细长填充和深色槽体找候选，
+        # 再用候选上方的中鱼圆形图标做 OK 特征确认，不锁定屏幕坐标。
         dark_mask = cv2.inRange(hsv, np.array([0, 0, 0]), np.array([179, 255, 90]))
         frame_height, frame_width = bgr.shape[:2]
         candidates: list[tuple[StaminaBarSample, float, bool]] = []
@@ -457,17 +590,16 @@ class FishingEngine:
                 continue
             if width < height * 2 or area < width * height * 0.55:
                 continue
-            sample = StaminaBarSample(width, (x + width // 2, y + height // 2))
             # 绿色填充右边应当是尚未消耗的深色进度槽。用条内中段避免圆角和描边干扰。
             core_top = y + max(1, height // 4)
             core_bottom = min(frame_height, y + height - max(1, height // 4))
-            track_depth = min(180, max(18, width))
+            track_depth = min(240, max(24, width * 2))
             right = min(frame_width, x + width + track_depth)
             right_band = dark_mask[core_top:core_bottom, x + width : right]
             right_dark_ratio = (
                 float(cv2.countNonZero(right_band)) / max(1, right_band.size)
             )
-            # 满体力时右侧空槽可能很短，再以条的上下描边作弱特征兜底。
+            # 满体力时右侧空槽很短，因此保留上下深色描边作为弱结构特征。
             border_top = dark_mask[max(0, y - 3) : y, x : x + width]
             border_bottom = dark_mask[
                 y + height : min(frame_height, y + height + 3), x : x + width
@@ -478,6 +610,21 @@ class FishingEngine:
                 / max(1, border_size)
             )
             track_score = right_dark_ratio * 2.0 + border_dark_ratio * 0.35
+            anchor_confidence = (
+                cls._stamina_anchor_confidence(bgr, x, y, width, height)
+                if require_anchor
+                else 1.0
+            )
+            if (
+                require_anchor
+                and anchor_confidence < cls.STAMINA_ANCHOR_MATCH_THRESHOLD
+            ):
+                continue
+            sample = StaminaBarSample(
+                width,
+                (x + width // 2, y + height // 2),
+                anchor_confidence,
+            )
             in_focus_area = (
                 frame_width * 0.20 <= sample.center[0] <= frame_width * 0.80
                 and frame_height * 0.10 <= sample.center[1] <= frame_height * 0.65
@@ -485,10 +632,25 @@ class FishingEngine:
             candidates.append((sample, track_score, in_focus_area))
         if not candidates:
             return None
-        # 中部只是同分时的弱偏好，不能再作为硬过滤条件；角色和绿条会随画面移动。
+        # OK 锚点优先；中部位置和填充宽度只在相似度接近时作弱排序。
         sample, _track_score, _in_focus = max(
             candidates,
-            key=lambda item: (item[1], 0.10 if item[2] else 0.0, item[0].fill_width),
+            key=lambda item: (
+                item[0].anchor_confidence,
+                (
+                    -float(
+                        np.hypot(
+                            item[0].center[0] - preferred_center[0],
+                            item[0].center[1] - preferred_center[1],
+                        )
+                    )
+                    if preferred_center is not None
+                    else item[1]
+                ),
+                item[1],
+                0.10 if item[2] else 0.0,
+                item[0].fill_width,
+            ),
         )
         return sample
 
@@ -650,6 +812,7 @@ class FishingEngine:
             baseline_scale=0.5,
             category_name="runtime_text_template",
         )
+
     @classmethod
     def fish_escape_message_confidence(cls, bgr: np.ndarray) -> float:
         """用固定文字模板识别“猶豫了一下，結果讓牠跑掉了……”提示。"""
@@ -714,13 +877,10 @@ class FishingEngine:
             use_gray_scale=False,
         )
 
-    @classmethod
-    def _load_ok_icon_template(cls, path: Path) -> np.ndarray | None:
-        image = cv2.imread(str(path), cv2.IMREAD_COLOR)
-        if image is None:
-            return None
-        # 只从静态样本中裁出圆形按钮核心，排除动态地面和 Space 标签。
-        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    @staticmethod
+    def _crop_ok_icon_image(image: np.ndarray) -> np.ndarray:
+        """裁出圆形按钮核心，排除动态地面和 Space 标签。"""
+        hsv = cv2.cvtColor(image[:, :, :3], cv2.COLOR_BGR2HSV)
         green = cv2.inRange(hsv, np.array([35, 45, 55]), np.array([100, 255, 255]))
         blue = cv2.inRange(hsv, np.array([90, 45, 55]), np.array([132, 255, 255]))
         mask = cv2.bitwise_or(green, blue)
@@ -739,6 +899,13 @@ class FishingEngine:
         if right <= left or bottom <= top:
             return image[:, :, :3]
         return image[top:bottom, left:right, :3]
+
+    @classmethod
+    def _load_ok_icon_template(cls, path: Path) -> np.ndarray | None:
+        image = cv2.imread(str(path), cv2.IMREAD_COLOR)
+        if image is None:
+            return None
+        return cls._crop_ok_icon_image(image)
 
     @classmethod
     def _get_ok_icon_templates(cls) -> dict[str, np.ndarray]:
@@ -768,29 +935,68 @@ class FishingEngine:
     @classmethod
     def _get_ok_idle_rotated_templates(cls) -> tuple[np.ndarray, ...]:
         if cls._ok_idle_rotated_templates is None:
-            base = cls._get_ok_icon_templates().get("idle_recovery")
-            if base is None:
-                cls._ok_idle_rotated_templates = ()
-            else:
-                height, width = base.shape[:2]
-                side = max(height, width)
-                top = (side - height) // 2
-                bottom = side - height - top
-                left = (side - width) // 2
-                right = side - width - left
-                square = cv2.copyMakeBorder(
-                    base,
-                    top,
-                    bottom,
-                    left,
-                    right,
-                    cv2.BORDER_REFLECT_101,
-                )
-                cls._ok_idle_rotated_templates = tuple(
-                    cls._rotate_ok_template(square, angle)
-                    for angle in range(0, 360, 15)
-                )
+            templates: list[np.ndarray] = []
+            if OK_IDLE_MOTION_TEMPLATE_PATH.exists():
+                capture = cv2.VideoCapture(str(OK_IDLE_MOTION_TEMPLATE_PATH))
+                frame_index = 0
+                try:
+                    while True:
+                        success, frame = capture.read()
+                        if not success:
+                            break
+                        # 真实 GIF 共 180 帧；每 12 帧取一个方向，覆盖指针旋转和轻微动画。
+                        if frame_index % 12 == 0:
+                            templates.append(cls._crop_ok_icon_image(frame))
+                        frame_index += 1
+                finally:
+                    capture.release()
+            if not templates:
+                # 资源缺失时仍保留合成旋转模板，避免整个指南针恢复功能失效。
+                base = cls._get_ok_icon_templates().get("idle_recovery")
+                if base is not None:
+                    height, width = base.shape[:2]
+                    side = max(height, width)
+                    top = (side - height) // 2
+                    bottom = side - height - top
+                    left = (side - width) // 2
+                    right = side - width - left
+                    square = cv2.copyMakeBorder(
+                        base,
+                        top,
+                        bottom,
+                        left,
+                        right,
+                        cv2.BORDER_REFLECT_101,
+                    )
+                    templates.extend(
+                        cls._rotate_ok_template(square, angle)
+                        for angle in range(0, 360, 15)
+                    )
+            cls._ok_idle_rotated_templates = tuple(templates)
         return cls._ok_idle_rotated_templates
+
+    @classmethod
+    def _get_ok_idle_center_template(cls) -> np.ndarray | None:
+        """合成不受指针旋转影响的指南针中心黑点锚点。"""
+        if cls._ok_idle_center_template is None:
+            anchors: list[np.ndarray] = []
+            for template in cls._get_ok_idle_rotated_templates():
+                height, width = template.shape[:2]
+                side = max(12, round(min(height, width) * 0.32))
+                center_x = width // 2
+                center_y = height // 2
+                left = max(0, center_x - side // 2)
+                top = max(0, center_y - side // 2)
+                anchor = template[top : top + side, left : left + side]
+                if anchor.size:
+                    anchors.append(
+                        cv2.resize(anchor, (48, 48), interpolation=cv2.INTER_AREA)
+                    )
+            if anchors:
+                cls._ok_idle_center_template = np.mean(
+                    np.stack(anchors), axis=0
+                ).astype(np.uint8)
+        return cls._ok_idle_center_template
 
     @classmethod
     def ok_icon_state_match(
@@ -824,7 +1030,7 @@ class FishingEngine:
         ):
             return best_state, best_confidence, second_confidence
 
-        # 指南针指针会随人物方向旋转。普通模板未过门槛时，再用旋转模板复核；
+        # 指南针指针会随人物方向旋转。普通模板未过门槛时，再用 GIF 真实方向帧复核；
         # 仍由 OK FeatureSet 完成匹配，不借用旧像素规则。
         idle_confidence = max(
             (
@@ -843,7 +1049,7 @@ class FishingEngine:
                         template,
                         search_top_ratio=0.0,
                         search_bottom_ratio=1.0,
-                        scales=np.array([0.70, 0.78, 0.86, 0.92, 0.98]),
+                        scales=np.array([0.72, 0.75, 0.78, 0.81, 0.86, 0.94, 1.02, 1.10, 1.18]),
                         normalized_width=cls.OK_ICON_NORMALIZED_WIDTH,
                         baseline_scale=1.0,
                         category_name=f"icon_idle_rotated_{index}",
@@ -869,6 +1075,34 @@ class FishingEngine:
                 idle_confidence,
                 non_idle_confidence,
             )
+
+        # 实机缩放会显著压低旋转整图模板分数。先要求整图轮廓与其他按钮拉开差距，
+        # 再用固定在中心的黑点锚点校正；仍全部通过 OK FeatureSet 完成识别。
+        if (
+            idle_confidence >= cls.OK_IDLE_CORRECTED_MATCH_THRESHOLD
+            and idle_confidence - non_idle_confidence
+            >= cls.OK_IDLE_CORRECTED_MATCH_MARGIN
+        ):
+            center_template = cls._get_ok_idle_center_template()
+            try:
+                center_confidence = cls._ok_multiscale_confidence(
+                    bgr,
+                    center_template,
+                    search_top_ratio=0.0,
+                    search_bottom_ratio=1.0,
+                    scales=np.linspace(0.55, 1.55, 21),
+                    normalized_width=cls.OK_ICON_NORMALIZED_WIDTH,
+                    baseline_scale=1.0,
+                    category_name="icon_idle_center_anchor",
+                )
+            except (ValueError, cv2.error):
+                center_confidence = 0.0
+            if center_confidence >= cls.OK_IDLE_CENTER_MATCH_THRESHOLD:
+                return (
+                    IconState.IDLE_RECOVERY,
+                    max(idle_confidence, center_confidence),
+                    non_idle_confidence,
+                )
         return None, max(best_confidence, idle_confidence), second_confidence
 
     def _on_key_press(
@@ -911,16 +1145,22 @@ class FishingEngine:
                     escape_message_confidence = 0.0
                     rod_required_confidence: float | None = None
                     inventory_full_confidence: float | None = None
-                    if (
+                    if strategy == "stamina_bounce" and (
                         icon_state == IconState.FISH_HOOKED
-                        and strategy == "stamina_bounce"
+                        or self._fish_resolution_pending
                     ):
+                        # 上钩一经确认便持续扫描整张画面；右下角图标短暂漏识别
+                        # 不能中断角色头顶绿条的下降/反弹序列。
                         stamina_sample = self._capture_stamina_sample(
                             screen, config, loop_now
                         )
-                    elif strategy == "stamina_bounce" and (
-                        self._fish_resolution_pending
-                        or self._escape_watch_until > loop_now
+                    if (
+                        strategy == "stamina_bounce"
+                        and stamina_sample is None
+                        and (
+                            self._fish_resolution_pending
+                            or self._escape_watch_until > loop_now
+                        )
                     ):
                         escape_message_confidence = (
                             self._capture_escape_message_confidence(
@@ -1017,13 +1257,43 @@ class FishingEngine:
                 self._emit(EventKind.WARNING, f"无法读取活鱼体力条：{error}")
                 self._last_stamina_warning_at = now
             return None
-        sample = self.find_stamina_bar(frame[:, :, :3])
+        game_frame = frame[:, :, :3]
+        sample = self.find_stamina_bar(game_frame, require_anchor=True)
+        if (
+            sample is None
+            and self._stamina_bar_seen
+            and self._stamina_last_center is not None
+        ):
+            # OK 锚点偶发动画漏帧时，只接受紧邻上一位置的槽体候选；
+            # 不会退回全画面任意绿色像素，也不会改变用户选择的图标识别模式。
+            nearby = self.find_stamina_bar(
+                game_frame,
+                require_anchor=False,
+                preferred_center=self._stamina_last_center,
+            )
+            if nearby is not None:
+                distance = float(
+                    np.hypot(
+                        nearby.center[0] - self._stamina_last_center[0],
+                        nearby.center[1] - self._stamina_last_center[1],
+                    )
+                )
+                movement_limit = max(
+                    80.0, min(game_frame.shape[0], game_frame.shape[1]) * 0.18
+                )
+                if distance <= movement_limit:
+                    sample = replace(nearby, anchor_confidence=0.0)
         if sample is None:
             if now - self._last_stamina_missing_log_at >= 2.0:
-                source = "目标窗口完整画面" if config.capture_mode == "window" else "当前显示器完整画面"
+                source = (
+                    "目标窗口完整画面"
+                    if config.capture_mode == "window"
+                    else "当前显示器完整画面"
+                )
                 self._emit(
                     EventKind.INFO,
-                    f"体力条扫描：在{source}中暂未找到角色头顶绿条，将继续扫描。",
+                    f"体力条扫描：在{source}中暂未同时确认中鱼图标与"
+                    "角色头顶绿条，将继续扫描。",
                     monitoring=True,
                 )
                 self._last_stamina_missing_log_at = now
@@ -1171,6 +1441,11 @@ class FishingEngine:
                 recognition_detail = (
                     f"OK 特征，相似度 {recognition_confidence:.3f}"
                 )
+            elif recognition_source == "compass_pixel":
+                recognition_detail = (
+                    "指南针像素校正，"
+                    f"中心黑点匹配度 {recognition_confidence * 100:.1f}%"
+                )
             else:
                 recognition_detail = (
                     "兼容像素，"
@@ -1262,44 +1537,60 @@ class FishingEngine:
                 self._waiting_for_clear = False
                 self._schedule_recast(now, config, "收鱼完成")
         elif self._fish_resolution_pending:
-            if not fish_visible and self._clear_frames >= config.clear_consecutive_frames:
-                if self._catch_strategy(config) == "stamina_bounce":
-                    self._start_escape_watch(now)
-                    if icon_state == IconState.READY_TO_CAST:
-                        self._finish_escape_watch(
-                            now, config, ready_visible=True
-                        )
-                else:
-                    self._fish_resolution_pending = False
-                    self._reset_stamina_tracking()
-                    self._schedule_recast(now, config, "计时目标已消失")
-            elif fish_visible:
-                strategy = self._catch_strategy(config)
-                if strategy == "fixed_delay":
-                    hook_started = self._hook_started_at or now
-                    if now - hook_started >= config.fallback_collect_delay_seconds:
-                        self._collect_fish(
-                            now,
-                            config,
-                            "备用模式 2 计时完成，已按 Space 收鱼。",
-                        )
-                elif strategy == "stamina_bounce":
+            strategy = self._catch_strategy(config)
+            if strategy == "stamina_bounce":
+                if stamina_sample is not None:
+                    # 绿条和中鱼锚点比右下角图标更直接；命中时清掉图标漏识别帧。
+                    self._clear_frames = 0
                     if self._observe_stamina_bar(stamina_sample):
                         self._collect_fish(
                             now,
                             config,
                             "绿色体力条已下降穿过半条，并在反弹时第二次穿过半条；已按 Space 收鱼。",
                         )
-                    elif self._learned_collect_due(now, config):
-                        target, margin = self.learned_collect_timing(
-                            config.learned_escape_seconds
+                stamina_reference_at = (
+                    self._last_stamina_seen_at
+                    or self._hook_started_at
+                    or now
+                )
+                if (
+                    self._fish_resolution_pending
+                    and stamina_sample is None
+                    and not fish_visible
+                    and self._clear_frames >= config.clear_consecutive_frames
+                    and now - stamina_reference_at
+                    >= self.STAMINA_LOST_GRACE_SECONDS
+                ):
+                    self._start_escape_watch(now)
+                    if icon_state == IconState.READY_TO_CAST:
+                        self._finish_escape_watch(
+                            now, config, ready_visible=True
                         )
-                        self._collect_fish(
-                            now,
-                            config,
-                            f"体力条未完成二次半条确认，已按跑鱼学习时间 {target:.1f} 秒兜底收杆（提前 {margin:.1f} 秒）。",
-                            allow_without_stamina=True,
-                        )
+                elif (
+                    self._fish_resolution_pending
+                    and self._learned_collect_due(now, config)
+                ):
+                    target, margin = self.learned_collect_timing(
+                        config.learned_escape_seconds
+                    )
+                    self._collect_fish(
+                        now,
+                        config,
+                        f"体力条未完成二次半条确认，已按跑鱼学习时间 {target:.1f} 秒兜底收杆（提前 {margin:.1f} 秒）。",
+                        allow_without_stamina=True,
+                    )
+            elif not fish_visible and self._clear_frames >= config.clear_consecutive_frames:
+                self._fish_resolution_pending = False
+                self._reset_stamina_tracking()
+                self._schedule_recast(now, config, "计时目标已消失")
+            elif fish_visible and strategy == "fixed_delay":
+                hook_started = self._hook_started_at or now
+                if now - hook_started >= config.fallback_collect_delay_seconds:
+                    self._collect_fish(
+                        now,
+                        config,
+                        "备用模式 2 计时完成，已按 Space 收鱼。",
+                    )
         elif (
             fish_visible
             and self._red_frames >= config.trigger_consecutive_frames
@@ -1605,10 +1896,13 @@ class FishingEngine:
         width = sample.fill_width
         self._stamina_sample_count += 1
         observed_at = time.monotonic()
+        self._last_stamina_seen_at = observed_at
+        self._stamina_last_center = sample.center
         if observed_at - self._last_stamina_observation_log_at >= 0.9:
             self._emit(
                 EventKind.INFO,
-                f"体力条扫描命中：填充 {width} px，位置 {sample.center}，第 {self._stamina_sample_count} 次采样。",
+                f"体力条扫描命中：填充 {width} px，位置 {sample.center}，"
+                f"中鱼锚点 OK {sample.anchor_confidence:.3f}，第 {self._stamina_sample_count} 次采样。",
                 monitoring=True,
             )
             self._last_stamina_observation_log_at = observed_at
@@ -1723,6 +2017,8 @@ class FishingEngine:
         self._stamina_bar_seen = False
         self._stamina_sample_count = 0
         self._last_stamina_observation_log_at = 0.0
+        self._last_stamina_seen_at = 0.0
+        self._stamina_last_center = None
         self._last_stamina_scan_at = 0.0
 
     def _handle_horse_icon(

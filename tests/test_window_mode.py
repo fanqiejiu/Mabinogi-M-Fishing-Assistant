@@ -119,6 +119,18 @@ class WindowModeTests(unittest.TestCase):
             frame = backend._get_frame_with_warmup()  # type: ignore[attr-defined]
         self.assertIs(frame, expected)
 
+    def test_ok_crop_shifts_bottom_right_roi_inside_wgc_frame(self) -> None:
+        info = WindowInfo(101, "瑪奇 Mobile", 0, 0, 1918, 1030)
+        frame = np.zeros((1030, 1918, 3), dtype=np.uint8)
+        frame[950, 1821] = (11, 22, 33)
+
+        cropped = window_target._crop_backend_frame(
+            frame, info, (1821, 950), 160, 186
+        )
+
+        self.assertEqual(cropped.shape, (186, 160, 3))
+        np.testing.assert_array_equal(cropped[106, 80], (11, 22, 33))
+
     def test_ok_window_backend_virtual_hover_uses_message_only(self) -> None:
         backend = window_target.OkWindowBackend(self.target)
         backend._capture = object()  # type: ignore[attr-defined]

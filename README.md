@@ -4,7 +4,7 @@
   <img src="fishing_assistant/assets/tomato_fish_icon.png" width="112" alt="番茄鱼项目图标">
 </p>
 
-<p align="center">Windows 本地钓鱼辅助工具 · v0.5.5</p>
+<p align="center">Windows 本地钓鱼辅助工具 · v0.5.6</p>
 
 <p align="center">
   <a href="https://github.com/fanqiejiu/Mabinogi-M-Fishing-Assistant/releases">📥 下载 Release</a> ·
@@ -16,14 +16,14 @@
 
 洛奇 M 钓鱼助手读取右下角圆形按钮的画面，识别上钩、等待、指南针和骑马图标，再按 `Space`、`W`、`S` 完成收鱼、续钓或恢复。
 
-图标默认使用 OK FeatureSet 图片特征识别。设置页也保留旧版像素兼容模式，两种方案由用户手动选择，不会自动互相回退。
+图标默认使用 OK FeatureSet 图片特征识别。指南针是旋转动画，单独用中心黑点和指针配色做像素校正；其他图标不会自动回退到旧像素规则。设置页仍保留可由用户手动选择的旧版像素兼容模式。
 
-它先等待画面出现上钩图标，再根据所选模式判断收杆时机。模式 1 会追踪角色头顶绿条；模式 2 使用自定义计时；模式 3 上钩后立即收杆。
+它先等待画面出现上钩图标，再根据所选模式判断收杆时机。模式 1 先确认绿条上方的中鱼图标，再追踪会随角色移动的头顶绿条；模式 2 使用自定义计时；模式 3 上钩后立即收杆。
 
 ## 功能
 
 - **两种图标识别方案**：默认使用 OK FeatureSet 图片特征；旧版像素模式只在用户手动选择时启用。
-- **三种收鱼方式**：模式 1 实验性识别体力条反弹，模式 2 固定计时，模式 3 上钩立即收杆。
+- **三种收鱼方式**：模式 1 用 OK 中鱼图标定位动态绿条并识别反弹，模式 2 固定计时，模式 3 上钩立即收杆。
 - **耗材与背包保护**：连续尝试失败后，用 OK 特征确认鱼竿提示、背包满文字和红色背包图标，确认后停止监测。
 - **跑鱼时间学习**：模式 1 检测到“讓牠跑掉了”后记录本轮耗时；下一轮识别仍失败时提前 1–2 秒兜底收杆。
 - **自动收鱼与续钓**：上钩后收鱼，图标恢复后再抛竿。
@@ -44,7 +44,7 @@
 
 ### 直接运行
 
-在 [Releases](https://github.com/fanqiejiu/Mabinogi-M-Fishing-Assistant/releases) 下载 `ok-MabinogiFishing.exe`，解压后直接运行。
+在 [Releases](https://github.com/fanqiejiu/Mabinogi-M-Fishing-Assistant/releases) 下载带版本号的 `ok-MabinogiFishing-vX.Y.Z.exe`，解压后直接运行。首次启动会请求管理员权限；程序已运行时再次启动会给出提示并退出。
 
 首次启动会短暂显示项目图标和版本号。配置、日志和诊断包均保存在本机。
 
@@ -109,7 +109,7 @@ cd Mabinogi-M-Fishing-Assistant
 .\build.bat
 ```
 
-打包结果为 `dist\ok-MabinogiFishing.exe`。EXE 包含 Qt、OpenCV 与 OK 框架依赖，建议作为 Release 附件，不要提交到源码仓库。
+0.5.6 打包结果为 `dist\ok-MabinogiFishing-v0.5.6.exe`。EXE 包含 Qt、OpenCV 与 OK 框架依赖，建议作为 Release 附件，不要提交到源码仓库。
 
 ## 许可证
 

@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 APP_NAME = "洛奇 M 钓鱼助手"
-APP_VERSION = "0.5.5"
+APP_VERSION = "0.5.6"
 APP_AUTHOR = "番茄啾"
 APP_DISPLAY_VERSION = APP_VERSION
 GITHUB_REPOSITORY = "fanqiejiu/Mabinogi-M-Fishing-Assistant"
@@ -23,6 +23,12 @@ def resource_path(*parts: str) -> Path:
 
 
 APP_ICON_PATH = resource_path("fishing_assistant", "assets", "tomato_fish_icon.png")
+OK_IDLE_MOTION_TEMPLATE_PATH = resource_path(
+    "fishing_assistant", "assets", "ok_icon_idle_recovery_motion.gif"
+)
+OK_STAMINA_ANCHOR_TEMPLATE_PATH = resource_path(
+    "fishing_assistant", "assets", "ok_stamina_fish_anchor.png"
+)
 OK_ICON_TEMPLATE_PATHS = {
     "waiting_bite": resource_path(
         "fishing_assistant", "assets", "ok_icon_waiting_bite.png"

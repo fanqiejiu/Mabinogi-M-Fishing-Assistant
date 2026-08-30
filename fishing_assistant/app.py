@@ -12,10 +12,11 @@ from .constants import APP_ICON_PATH, APP_NAME
 from .diagnostics import record_error
 from .engine import FishingEngine
 from .splash import create_splash
+from .startup_guard import prepare_windows_startup
 from .ui import MainWindow
 
 
-def main() -> None:
+def _run_application() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("Mabinogi M Fishing Assistant")
     app.setApplicationDisplayName(APP_NAME)
@@ -48,4 +49,15 @@ def main() -> None:
     QTimer.singleShot(1100, finish_startup)
     exit_code = app.exec()
     engine.close()
+    return exit_code
+
+
+def main() -> None:
+    startup_guard = prepare_windows_startup()
+    if startup_guard is None:
+        return
+    try:
+        exit_code = _run_application()
+    finally:
+        startup_guard.close()
     raise SystemExit(exit_code)

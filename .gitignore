@@ -11,6 +11,9 @@ ui_qa.png
 ui_qa_day.png
 ui_qa_detection.png
 
+# Local reference media
+pic/
+
 # PyInstaller output
 build/
 dist/

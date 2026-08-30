@@ -659,7 +659,7 @@ class MainWindow(QMainWindow):
             option_panel("模式 3 已就绪", "检测到上钩图标后立即按 Space 收杆，无额外参数。")
         )
         catch_grid.addWidget(
-            self._form_label("收鱼模式", "模式 1 第一次下降穿过半条只记录，反弹后第二次穿过半条才收杆。"),
+            self._form_label("收鱼模式", "模式 1 先用 OK 特征确认绿条上方的中鱼图标；第一次下降穿过半条只记录，反弹后第二次穿过半条才收杆。"),
             0,
             0,
         )
@@ -817,7 +817,7 @@ class MainWindow(QMainWindow):
         identity_layout = QVBoxLayout(identity)
         identity_layout.setContentsMargins(24, 22, 24, 22)
         identity_layout.setSpacing(7)
-        identity_layout.addLayout(self._card_heading("应用设置", "本页的网络与诊断功能均由你主动控制。"))
+        identity_layout.addLayout(self._card_heading("应用设置"))
         version = QLabel(f"{APP_NAME}  ·  v{APP_VERSION}")
         version.setObjectName("metricValue")
         version.setStyleSheet("font-size: 18px; padding-top: 5px;")
@@ -904,16 +904,17 @@ class MainWindow(QMainWindow):
         return scroll
 
     @staticmethod
-    def _card_heading(title: str, hint: str) -> QVBoxLayout:
+    def _card_heading(title: str, hint: str = "") -> QVBoxLayout:
         layout = QVBoxLayout()
         layout.setSpacing(3)
         title_label = QLabel(title)
         title_label.setObjectName("cardTitle")
-        hint_label = QLabel(hint)
-        hint_label.setObjectName("cardHint")
-        hint_label.setWordWrap(True)
         layout.addWidget(title_label)
-        layout.addWidget(hint_label)
+        if hint:
+            hint_label = QLabel(hint)
+            hint_label.setObjectName("cardHint")
+            hint_label.setWordWrap(True)
+            layout.addWidget(hint_label)
         return layout
 
     @staticmethod
@@ -1173,7 +1174,7 @@ class MainWindow(QMainWindow):
         stack_index = {"stamina_bounce": 0, "fixed_delay": 1, "instant": 2}.get(strategy, 0)
         self.catch_option_stack.setCurrentIndex(stack_index)
         hints = {
-            "stamina_bounce": "模式 1（实验性功能，不稳定）：首次下降穿过半条不会收杆；必须反弹并第二次穿过半条。若识别失败后出现跑鱼提示，会学习本轮耗时并在下一轮提前 1–2 秒兜底。",
+            "stamina_bounce": "模式 1（实验性功能，不稳定）：先用 OK 特征确认中鱼图标，再跟踪可移动的角色头顶绿条。首次下降穿过半条不会收杆；必须反弹并第二次穿过半条。若识别失败后出现跑鱼提示，会学习本轮耗时并在下一轮提前 1–2 秒兜底。",
             "fixed_delay": "模式 2：不分析体力条，上钩后按设定秒数收鱼。用于体力条无法稳定识别的场景。",
             "instant": "模式 3：只要识别到上钩鱼图标，立即按 Space 收杆。",
         }
@@ -1415,9 +1416,14 @@ class MainWindow(QMainWindow):
 
     def _consume_engine_event(self, event: EngineEvent) -> None:
         if event.kind == EventKind.METRIC:
-            if event.recognition_source == "ok_feature":
+            if event.recognition_source in {"ok_feature", "compass_pixel"}:
                 confidence = max(0.0, min(1.0, event.recognition_confidence))
-                self.red_metric.caption_label.setText("OK 特征相似度")
+                caption = (
+                    "指南针中心黑点"
+                    if event.recognition_source == "compass_pixel"
+                    else "OK 特征相似度"
+                )
+                self.red_metric.caption_label.setText(caption)
                 self.red_metric.value_label.setText(f"{confidence * 100:.1f}%")
                 self.red_progress.setMaximum(1000)
                 self.red_progress.setValue(round(confidence * 1000))

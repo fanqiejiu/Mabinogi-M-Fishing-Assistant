@@ -13,6 +13,8 @@ from fishing_assistant.constants import (
     INVENTORY_FULL_ICON_TEMPLATE_PATH,
     INVENTORY_FULL_TEMPLATE_PATH,
     OK_ICON_TEMPLATE_PATHS,
+    OK_IDLE_MOTION_TEMPLATE_PATH,
+    OK_STAMINA_ANCHOR_TEMPLATE_PATH,
     ROD_REQUIRED_TEMPLATE_PATH,
 )
 from fishing_assistant.engine import FishingEngine, IconState, StaminaBarSample
@@ -224,28 +226,72 @@ class FishingEngineTests(unittest.TestCase):
                 self.assertIsNotNone(frame)
                 state, signals = FishingEngine.classify_frame_state(frame, config)
                 self.assertEqual(state, IconState(state_name))
-                self.assertEqual(signals.recognition_source, "ok_feature")
-                self.assertGreaterEqual(
-                    signals.recognition_confidence,
-                    FishingEngine.OK_ICON_MATCH_THRESHOLD,
-                )
+                if state == IconState.IDLE_RECOVERY:
+                    self.assertEqual(signals.recognition_source, "compass_pixel")
+                    self.assertGreaterEqual(
+                        signals.recognition_confidence,
+                        FishingEngine.COMPASS_PIXEL_MATCH_THRESHOLD,
+                    )
+                else:
+                    self.assertEqual(signals.recognition_source, "ok_feature")
+                    self.assertGreaterEqual(
+                        signals.recognition_confidence,
+                        FishingEngine.OK_ICON_MATCH_THRESHOLD,
+                    )
 
-    def test_ok_mode_recognizes_randomly_rotated_compass(self) -> None:
+    def test_ok_mode_recognizes_real_compass_motion_frames(self) -> None:
         config = AppConfig(recognition_backend="ok")
-        templates = FishingEngine._get_ok_idle_rotated_templates()
-        self.assertTrue(templates)
-        compass = templates[0]
+        capture = cv2.VideoCapture(str(OK_IDLE_MOTION_TEMPLATE_PATH))
+        target_frames = {8, 45, 97, 143, 178}
+        checked: set[int] = set()
+        frame_index = 0
+        try:
+            while True:
+                success, frame = capture.read()
+                if not success:
+                    break
+                if frame_index in target_frames:
+                    state, signals = FishingEngine.classify_frame_state(frame, config)
+                    self.assertEqual(state, IconState.IDLE_RECOVERY)
+                    self.assertEqual(signals.recognition_source, "compass_pixel")
+                    self.assertGreaterEqual(
+                        signals.recognition_confidence,
+                        FishingEngine.COMPASS_PIXEL_MATCH_THRESHOLD,
+                    )
+                    checked.add(frame_index)
+                frame_index += 1
+        finally:
+            capture.release()
+        self.assertEqual(checked, target_frames)
 
-        for angle in (7.5, 82.5, 172.5, 262.5):
-            with self.subTest(angle=angle):
-                frame = FishingEngine._rotate_ok_template(compass, angle)
-                state, signals = FishingEngine.classify_frame_state(frame, config)
+    def test_ok_mode_uses_compass_pixels_on_live_wgc_frame(self) -> None:
+        fixture_names = (
+            "ok_idle_compass_wgc_low_confidence.png",
+            "ok_idle_compass_clear.png",
+        )
+        for fixture_name in fixture_names:
+            with self.subTest(fixture=fixture_name):
+                frame = cv2.imread(
+                    str(Path(__file__).parent / "fixtures" / fixture_name),
+                    cv2.IMREAD_COLOR,
+                )
+                self.assertIsNotNone(frame)
+
+                with patch.object(
+                    FishingEngine, "ok_icon_state_match"
+                ) as ok_match:
+                    state, signals = FishingEngine.classify_frame_state(
+                        frame, AppConfig(recognition_backend="ok")
+                    )
+
+                ok_match.assert_not_called()
                 self.assertEqual(state, IconState.IDLE_RECOVERY)
-                self.assertEqual(signals.recognition_source, "ok_feature")
+                self.assertEqual(signals.recognition_source, "compass_pixel")
                 self.assertGreaterEqual(
                     signals.recognition_confidence,
-                    FishingEngine.OK_IDLE_ROTATED_MATCH_THRESHOLD,
+                    FishingEngine.COMPASS_PIXEL_MATCH_THRESHOLD,
                 )
+
     def test_ok_mode_never_falls_back_to_red_pixels(self) -> None:
         red_frame = np.zeros((180, 160, 3), dtype=np.uint8)
         red_frame[45:135, 35:125] = (0, 0, 255)
@@ -327,7 +373,10 @@ class FishingEngineTests(unittest.TestCase):
             recast_delay_ms=0,
         )
         engine = FishingEngine()
-        with patch("fishing_assistant.engine.pyautogui.press") as press:
+        with patch(
+            "fishing_assistant.engine.time.monotonic",
+            side_effect=[100.0, 100.4, 101.0],
+        ), patch("fishing_assistant.engine.pyautogui.press") as press:
             engine._process_frame(1985, config, IconState.FISH_HOOKED)
             engine._process_frame(0, config, IconState.NORMAL)
             engine._process_frame(0, config, IconState.NORMAL)
@@ -634,6 +683,52 @@ class FishingEngineTests(unittest.TestCase):
         self.assertEqual(sample.fill_width, 132)  # type: ignore[union-attr]
         self.assertEqual(sample.center, (127, 88))  # type: ignore[union-attr]
 
+    def test_production_stamina_detector_requires_ok_fish_anchor(self) -> None:
+        frame = np.full((360, 640, 3), 155, dtype=np.uint8)
+        green = cv2.cvtColor(
+            np.array([[[62, 210, 230]]], dtype=np.uint8), cv2.COLOR_HSV2BGR
+        )[0, 0]
+        frame[145:169, 355:540] = (40, 40, 40)
+        frame[150:164, 360:460] = green
+        anchor = cv2.imread(str(OK_STAMINA_ANCHOR_TEMPLATE_PATH), cv2.IMREAD_COLOR)
+        self.assertIsNotNone(anchor)
+        top, left = 80, 415
+        frame[top : top + anchor.shape[0], left : left + anchor.shape[1]] = anchor
+
+        sample = FishingEngine.find_stamina_bar(frame, require_anchor=True)
+        self.assertIsNotNone(sample)
+        self.assertEqual(sample.fill_width, 100)  # type: ignore[union-attr]
+        self.assertGreaterEqual(
+            sample.anchor_confidence,  # type: ignore[union-attr]
+            FishingEngine.STAMINA_ANCHOR_MATCH_THRESHOLD,
+        )
+
+        frame[top : top + anchor.shape[0], left : left + anchor.shape[1]] = 155
+        self.assertIsNone(FishingEngine.find_stamina_bar(frame, require_anchor=True))
+
+    def test_stamina_rebound_continues_when_hook_icon_temporarily_misses(self) -> None:
+        config = AppConfig(
+            catch_strategy="stamina_bounce",
+            trigger_consecutive_frames=1,
+            clear_consecutive_frames=2,
+            press_cooldown_ms=0,
+        )
+        engine = FishingEngine()
+        with patch("fishing_assistant.engine.pyautogui.press") as press:
+            engine._process_frame(
+                1985, config, IconState.FISH_HOOKED, StaminaBarSample(132, (400, 300))
+            )
+            engine._process_frame(
+                0, config, IconState.NORMAL, StaminaBarSample(64, (398, 301))
+            )
+            engine._process_frame(
+                0, config, IconState.NORMAL, StaminaBarSample(46, (402, 299))
+            )
+            engine._process_frame(
+                0, config, IconState.NORMAL, StaminaBarSample(72, (404, 302))
+            )
+
+        press.assert_called_once_with("space")
     def test_stamina_detector_prioritizes_character_zone_over_top_left_hud(self) -> None:
         hsv = np.zeros((1080, 1920, 3), dtype=np.uint8)
         hsv[80:94, 114:270] = (62, 210, 230)  # 左上角固定生命条

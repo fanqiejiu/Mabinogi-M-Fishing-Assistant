@@ -274,10 +274,13 @@ def _crop_backend_frame(
     center_y = round(center_offset[1] * scale_y)
     crop_width = max(1, round(width * scale_x))
     crop_height = max(1, round(height * scale_y))
-    left, top = center_x - crop_width // 2, center_y - crop_height // 2
+    if crop_width > frame_width or crop_height > frame_height:
+        raise RuntimeError("OK WGC 窗口画面小于识别区域，请恢复游戏窗口尺寸。")
+    # 钓鱼按钮位于右下角，校准点本身有效时，识别框仍可能越过 WGC 客户区
+    # 十几像素。保持识别框大小并向窗口内平移，按键坐标继续使用原校准点。
+    left = min(max(0, center_x - crop_width // 2), frame_width - crop_width)
+    top = min(max(0, center_y - crop_height // 2), frame_height - crop_height)
     right, bottom = left + crop_width, top + crop_height
-    if left < 0 or top < 0 or right > frame_width or bottom > frame_height:
-        raise RuntimeError("识别区域已超出 OK WGC 窗口画面，请重新校准。")
     return frame[top:bottom, left:right].copy()
 
 
