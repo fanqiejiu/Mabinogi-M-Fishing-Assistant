@@ -1,16 +1,46 @@
+import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import cv2
 import numpy as np
 
-from fishing_assistant.config import AppConfig
-from fishing_assistant.constants import FISH_ESCAPE_TEMPLATE_PATH
+from fishing_assistant.config import AppConfig, load_config
+from fishing_assistant.constants import (
+    FISH_ESCAPE_TEMPLATE_PATH,
+    INVENTORY_FULL_ICON_TEMPLATE_PATH,
+    INVENTORY_FULL_TEMPLATE_PATH,
+    OK_ICON_TEMPLATE_PATHS,
+    ROD_REQUIRED_TEMPLATE_PATH,
+)
 from fishing_assistant.engine import FishingEngine, IconState, StaminaBarSample
 from fishing_assistant.window_target import WindowInfo
 
 
 class FishingEngineTests(unittest.TestCase):
+    def test_default_icon_recognition_mode_is_ok(self) -> None:
+        self.assertEqual(AppConfig().recognition_backend, "ok")
+
+    def test_old_config_migrates_to_explicit_ok_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "fishing_config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 10,
+                        "recognition_backend": "pixel",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch("fishing_assistant.config.CONFIG_PATH", config_path):
+                config = load_config()
+
+        self.assertEqual(config.schema_version, 11)
+        self.assertEqual(config.recognition_backend, "ok")
+
     def test_waiting_frame_has_no_red_fish_signal(self) -> None:
         waiting = np.zeros((180, 160, 3), dtype=np.uint8)
         self.assertEqual(FishingEngine.count_fish_red_pixels(waiting), 0)
@@ -43,7 +73,8 @@ class FishingEngineTests(unittest.TestCase):
         hsv[35:118, 92:104] = (20, 180, 160)
 
         state, signals = FishingEngine.classify_frame_state(
-            cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR), AppConfig()
+            cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR),
+            AppConfig(recognition_backend="pixel"),
         )
 
         self.assertLess(signals.red_pixels, AppConfig().idle_red_pixel_min)
@@ -55,7 +86,8 @@ class FishingEngineTests(unittest.TestCase):
         hsv[52:108, 45:101] = (0, 0, 245)
 
         state, _signals = FishingEngine.classify_frame_state(
-            cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR), AppConfig()
+            cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR),
+            AppConfig(recognition_backend="pixel"),
         )
 
         self.assertEqual(state, IconState.WAITING_BITE)
@@ -108,6 +140,35 @@ class FishingEngineTests(unittest.TestCase):
         )
         press.assert_called_once_with("space")
 
+    def test_startup_compass_uses_short_probe_then_casts_on_rod(self) -> None:
+        config = AppConfig(
+            button_center=(1700, 900),
+            catch_strategy="instant",
+            recovery_consecutive_frames=8,
+            recovery_cooldown_ms=0,
+            recovery_pause_ms=0,
+        )
+        engine = FishingEngine()
+        engine._config = config  # type: ignore[attr-defined]
+
+        with patch.object(engine, "_prepare_stamina_view"), patch.object(
+            engine, "_tap_key"
+        ) as tap_key, patch(
+            "fishing_assistant.engine.pyautogui.press"
+        ) as press:
+            engine.set_monitoring(True)
+            engine._process_frame(365, config, IconState.IDLE_RECOVERY)
+            tap_key.assert_not_called()
+            engine._process_frame(365, config, IconState.IDLE_RECOVERY)
+            self.assertEqual(
+                [call.args[0] for call in tap_key.call_args_list],
+                ["w", "s"],
+            )
+            press.assert_not_called()
+            engine._process_frame(766, config, IconState.READY_TO_CAST)
+
+        engine._enabled.clear()  # type: ignore[attr-defined]
+        press.assert_called_once_with("space")
     def test_pending_recast_never_presses_waiting_bite_icon(self) -> None:
         config = AppConfig(press_cooldown_ms=0)
         engine = FishingEngine()
@@ -145,10 +206,77 @@ class FishingEngineTests(unittest.TestCase):
                 hsv[112:130, 68:92] = (0, 220, 240)
             return cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
 
-        mount_state, _ = FishingEngine.classify_frame_state(horse_frame(False), AppConfig())
-        dismount_state, _ = FishingEngine.classify_frame_state(horse_frame(True), AppConfig())
+        pixel_config = AppConfig(recognition_backend="pixel")
+        mount_state, _ = FishingEngine.classify_frame_state(
+            horse_frame(False), pixel_config
+        )
+        dismount_state, _ = FishingEngine.classify_frame_state(
+            horse_frame(True), pixel_config
+        )
         self.assertEqual(mount_state, IconState.HORSE_MOUNT_PROMPT)
         self.assertEqual(dismount_state, IconState.HORSE_DISMOUNT_PROMPT)
+
+    def test_ok_mode_recognizes_all_reference_icons(self) -> None:
+        config = AppConfig(recognition_backend="ok")
+        for state_name, path in OK_ICON_TEMPLATE_PATHS.items():
+            with self.subTest(state=state_name):
+                frame = cv2.imread(str(path), cv2.IMREAD_COLOR)
+                self.assertIsNotNone(frame)
+                state, signals = FishingEngine.classify_frame_state(frame, config)
+                self.assertEqual(state, IconState(state_name))
+                self.assertEqual(signals.recognition_source, "ok_feature")
+                self.assertGreaterEqual(
+                    signals.recognition_confidence,
+                    FishingEngine.OK_ICON_MATCH_THRESHOLD,
+                )
+
+    def test_ok_mode_recognizes_randomly_rotated_compass(self) -> None:
+        config = AppConfig(recognition_backend="ok")
+        templates = FishingEngine._get_ok_idle_rotated_templates()
+        self.assertTrue(templates)
+        compass = templates[0]
+
+        for angle in (7.5, 82.5, 172.5, 262.5):
+            with self.subTest(angle=angle):
+                frame = FishingEngine._rotate_ok_template(compass, angle)
+                state, signals = FishingEngine.classify_frame_state(frame, config)
+                self.assertEqual(state, IconState.IDLE_RECOVERY)
+                self.assertEqual(signals.recognition_source, "ok_feature")
+                self.assertGreaterEqual(
+                    signals.recognition_confidence,
+                    FishingEngine.OK_IDLE_ROTATED_MATCH_THRESHOLD,
+                )
+    def test_ok_mode_never_falls_back_to_red_pixels(self) -> None:
+        red_frame = np.zeros((180, 160, 3), dtype=np.uint8)
+        red_frame[45:135, 35:125] = (0, 0, 255)
+        with patch.object(
+            FishingEngine, "analyze_icon_colors"
+        ) as pixel_analyzer, patch.object(
+            FishingEngine,
+            "ok_icon_state_match",
+            return_value=(None, 0.82, 0.80),
+        ) as ok_match:
+            state, signals = FishingEngine.classify_frame_state(
+                red_frame, AppConfig(recognition_backend="ok")
+            )
+
+        pixel_analyzer.assert_not_called()
+        ok_match.assert_called_once()
+        self.assertEqual(state, IconState.NORMAL)
+        self.assertEqual(signals.recognition_source, "ok_feature")
+        self.assertAlmostEqual(signals.recognition_confidence, 0.82)
+
+    def test_pixel_mode_is_explicit_and_does_not_call_ok_icon_matcher(self) -> None:
+        red_frame = np.zeros((180, 160, 3), dtype=np.uint8)
+        red_frame[45:135, 35:125] = (0, 0, 255)
+        with patch.object(FishingEngine, "ok_icon_state_match") as ok_match:
+            state, signals = FishingEngine.classify_frame_state(
+                red_frame, AppConfig(recognition_backend="pixel")
+            )
+
+        ok_match.assert_not_called()
+        self.assertEqual(state, IconState.FISH_HOOKED)
+        self.assertEqual(signals.recognition_source, "compat_pixel")
 
     def test_horse_prompts_block_mount_and_correct_dismount(self) -> None:
         config = AppConfig(press_cooldown_ms=0)
@@ -173,8 +301,8 @@ class FishingEngineTests(unittest.TestCase):
         )
         engine = FishingEngine()
         with patch("fishing_assistant.engine.pyautogui.press") as press:
-            engine._process_frame(1985, config)
-            engine._process_frame(1985, config)
+            engine._process_frame(1985, config, IconState.FISH_HOOKED)
+            engine._process_frame(1985, config, IconState.FISH_HOOKED)
             engine._process_frame(766, config, IconState.READY_TO_CAST)
         self.assertEqual(press.call_args_list[0].args, ("space",))
         self.assertEqual(press.call_args_list[1].args, ("space",))
@@ -187,7 +315,7 @@ class FishingEngineTests(unittest.TestCase):
         )
         engine = FishingEngine()
         with patch("fishing_assistant.engine.pyautogui.press") as press:
-            engine._process_frame(1985, config)
+            engine._process_frame(1985, config, IconState.FISH_HOOKED)
         press.assert_called_once_with("space")
 
     def test_mode_one_false_hook_without_stamina_never_collects_or_recasts(self) -> None:
@@ -218,10 +346,10 @@ class FishingEngineTests(unittest.TestCase):
         trough = StaminaBarSample(48, (400, 300))
         rebound = StaminaBarSample(72, (400, 300))
         with patch("fishing_assistant.engine.pyautogui.press") as press:
-            engine._process_frame(1985, config, stamina_sample=peak)
-            engine._process_frame(1985, config, stamina_sample=trough)
+            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=peak)
+            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=trough)
             press.assert_not_called()
-            engine._process_frame(1985, config, stamina_sample=rebound)
+            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=rebound)
         press.assert_called_once_with("space")
 
     def test_tracking_that_starts_below_half_does_not_guess_first_crossing(self) -> None:
@@ -232,9 +360,9 @@ class FishingEngineTests(unittest.TestCase):
         )
         engine = FishingEngine()
         with patch("fishing_assistant.engine.pyautogui.press") as press:
-            engine._process_frame(1985, config, stamina_sample=StaminaBarSample(55, (80, 80)))
-            engine._process_frame(1985, config, stamina_sample=StaminaBarSample(45, (500, 320)))
-            engine._process_frame(1985, config, stamina_sample=StaminaBarSample(132, (500, 320)))
+            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=StaminaBarSample(55, (80, 80)))
+            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=StaminaBarSample(45, (500, 320)))
+            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=StaminaBarSample(132, (500, 320)))
         press.assert_not_called()
     def test_stamina_bar_without_rebound_is_not_collected(self) -> None:
         config = AppConfig(
@@ -244,9 +372,9 @@ class FishingEngineTests(unittest.TestCase):
         )
         engine = FishingEngine()
         with patch("fishing_assistant.engine.pyautogui.press") as press:
-            engine._process_frame(1985, config, stamina_sample=StaminaBarSample(132, (400, 300)))
-            engine._process_frame(1985, config, stamina_sample=StaminaBarSample(48, (400, 300)))
-            engine._process_frame(1985, config, stamina_sample=StaminaBarSample(56, (400, 300)))
+            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=StaminaBarSample(132, (400, 300)))
+            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=StaminaBarSample(48, (400, 300)))
+            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=StaminaBarSample(56, (400, 300)))
         press.assert_not_called()
 
     def test_stamina_rebound_works_when_first_peak_is_seen_late(self) -> None:
@@ -257,9 +385,9 @@ class FishingEngineTests(unittest.TestCase):
         )
         engine = FishingEngine()
         with patch("fishing_assistant.engine.pyautogui.press") as press:
-            engine._process_frame(1985, config, stamina_sample=StaminaBarSample(80, (400, 300)))
-            engine._process_frame(1985, config, stamina_sample=StaminaBarSample(38, (560, 480)))
-            engine._process_frame(1985, config, stamina_sample=StaminaBarSample(57, (120, 720)))
+            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=StaminaBarSample(80, (400, 300)))
+            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=StaminaBarSample(38, (560, 480)))
+            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=StaminaBarSample(57, (120, 720)))
         press.assert_called_once_with("space")
 
     def test_first_half_crossing_and_small_jitter_do_not_collect(self) -> None:
@@ -270,13 +398,184 @@ class FishingEngineTests(unittest.TestCase):
         )
         engine = FishingEngine()
         with patch("fishing_assistant.engine.pyautogui.press") as press:
-            engine._process_frame(1985, config, stamina_sample=StaminaBarSample(132, (400, 300)))
-            engine._process_frame(1985, config, stamina_sample=StaminaBarSample(64, (400, 300)))
-            engine._process_frame(1985, config, stamina_sample=StaminaBarSample(65, (400, 300)))
+            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=StaminaBarSample(132, (400, 300)))
+            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=StaminaBarSample(64, (400, 300)))
+            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=StaminaBarSample(65, (400, 300)))
             press.assert_not_called()
-            engine._process_frame(1985, config, stamina_sample=StaminaBarSample(46, (400, 300)))
-            engine._process_frame(1985, config, stamina_sample=StaminaBarSample(72, (400, 300)))
+            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=StaminaBarSample(46, (400, 300)))
+            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=StaminaBarSample(72, (400, 300)))
         press.assert_called_once_with("space")
+
+    def test_rod_required_template_matches_scaled_top_notice(self) -> None:
+        template = cv2.imread(str(ROD_REQUIRED_TEMPLATE_PATH), cv2.IMREAD_COLOR)
+        self.assertIsNotNone(template)
+        scaled = cv2.resize(template, None, fx=0.90, fy=0.90)
+        frame = np.full((1080, 1920, 3), 35, dtype=np.uint8)
+        top, left = 45, 650
+        frame[top : top + scaled.shape[0], left : left + scaled.shape[1]] = scaled
+
+        confidence = FishingEngine.rod_required_message_confidence(frame)
+
+        self.assertGreaterEqual(
+            confidence, FishingEngine.ROD_REQUIRED_MATCH_THRESHOLD
+        )
+
+    def test_inventory_full_template_matches_scaled_top_notice(self) -> None:
+        template = cv2.imread(
+            str(INVENTORY_FULL_TEMPLATE_PATH), cv2.IMREAD_COLOR
+        )
+        self.assertIsNotNone(template)
+        scaled = cv2.resize(template, None, fx=0.90, fy=0.90)
+        frame = np.full((1080, 1920, 3), 35, dtype=np.uint8)
+        top, left = 45, 650
+        frame[top : top + scaled.shape[0], left : left + scaled.shape[1]] = scaled
+
+        confidence = FishingEngine.inventory_full_message_confidence(frame)
+
+        self.assertGreaterEqual(
+            confidence, FishingEngine.INVENTORY_FULL_MATCH_THRESHOLD
+        )
+
+    def test_inventory_full_red_backpack_uses_ok_color_feature(self) -> None:
+        sample = cv2.imread(
+            str(INVENTORY_FULL_ICON_TEMPLATE_PATH), cv2.IMREAD_COLOR
+        )
+        self.assertIsNotNone(sample)
+        frame = np.full((1080, 1920, 3), 35, dtype=np.uint8)
+        top = frame.shape[0] - sample.shape[0]
+        left = frame.shape[1] - sample.shape[1]
+        frame[top:, left:] = sample
+
+        confidence = FishingEngine.inventory_full_icon_confidence(frame)
+
+        self.assertGreaterEqual(
+            confidence, FishingEngine.INVENTORY_FULL_ICON_MATCH_THRESHOLD
+        )
+
+    def test_inventory_full_icon_does_not_match_unrelated_fishing_icon(self) -> None:
+        sample = cv2.imread(
+            str(OK_ICON_TEMPLATE_PATHS["ready_to_cast"]), cv2.IMREAD_COLOR
+        )
+        self.assertIsNotNone(sample)
+        frame = np.full((1080, 1920, 3), 35, dtype=np.uint8)
+        top = frame.shape[0] - sample.shape[0]
+        left = frame.shape[1] - sample.shape[1]
+        frame[top:, left:] = sample
+
+        confidence = FishingEngine.inventory_full_icon_confidence(frame)
+
+        self.assertLess(
+            confidence, FishingEngine.INVENTORY_FULL_ICON_MATCH_THRESHOLD
+        )
+
+    def test_three_unconfirmed_casts_arm_rod_status_scan(self) -> None:
+        config = AppConfig(button_center=(1700, 900))
+        engine = FishingEngine()
+        with patch("fishing_assistant.engine.pyautogui.press") as press:
+            for attempt in range(FishingEngine.BLOCKING_MESSAGE_RETRY_THRESHOLD):
+                engine._pending_recast_at = 0.0  # type: ignore[attr-defined]
+                engine._pending_recast_reason = f"测试 {attempt}"  # type: ignore[attr-defined]
+                engine._perform_pending_recast(100.0 + attempt, IconState.READY_TO_CAST, config)
+
+        self.assertEqual(
+            engine._unconfirmed_cast_attempts,  # type: ignore[attr-defined]
+            FishingEngine.BLOCKING_MESSAGE_RETRY_THRESHOLD,
+        )
+        self.assertTrue(engine._should_scan_blocking_messages())  # type: ignore[attr-defined]
+        self.assertEqual(press.call_count, FishingEngine.BLOCKING_MESSAGE_RETRY_THRESHOLD)
+
+    def test_three_idle_recoveries_also_arm_rod_status_scan(self) -> None:
+        config = AppConfig(recovery_pause_ms=0)
+        engine = FishingEngine()
+        with patch.object(engine, "_tap_key") as tap_key:
+            for _attempt in range(FishingEngine.BLOCKING_MESSAGE_RETRY_THRESHOLD):
+                engine._recover_idle_state(config)
+
+        self.assertEqual(
+            engine._recovery_attempts_without_success,  # type: ignore[attr-defined]
+            FishingEngine.BLOCKING_MESSAGE_RETRY_THRESHOLD,
+        )
+        self.assertTrue(engine._should_scan_blocking_messages())  # type: ignore[attr-defined]
+        self.assertEqual(tap_key.call_count, FishingEngine.BLOCKING_MESSAGE_RETRY_THRESHOLD * 2)
+
+    def test_successful_waiting_state_clears_failed_start_tracking(self) -> None:
+        config = AppConfig()
+        engine = FishingEngine()
+        engine._enabled.set()  # type: ignore[attr-defined]
+        engine._unconfirmed_cast_attempts = 3  # type: ignore[attr-defined]
+        engine._recovery_attempts_without_success = 3  # type: ignore[attr-defined]
+        engine._rod_required_hits = 1  # type: ignore[attr-defined]
+        engine._inventory_full_hits = 1  # type: ignore[attr-defined]
+
+        engine._process_frame(
+            0,
+            config,
+            IconState.WAITING_BITE,
+            rod_required_confidence=0.99,
+        )
+
+        self.assertTrue(engine.is_monitoring())
+        self.assertEqual(engine._unconfirmed_cast_attempts, 0)  # type: ignore[attr-defined]
+        self.assertEqual(engine._recovery_attempts_without_success, 0)  # type: ignore[attr-defined]
+        self.assertEqual(engine._rod_required_hits, 0)  # type: ignore[attr-defined]
+        self.assertEqual(engine._inventory_full_hits, 0)  # type: ignore[attr-defined]
+        engine._enabled.clear()  # type: ignore[attr-defined]
+
+    def test_rod_required_notice_stops_after_two_confirmed_frames(self) -> None:
+        config = AppConfig()
+        events = []
+        engine = FishingEngine(events.append)
+        engine._enabled.set()  # type: ignore[attr-defined]
+        engine._unconfirmed_cast_attempts = 3  # type: ignore[attr-defined]
+
+        with patch("fishing_assistant.engine.record_error"):
+            engine._process_frame(
+                365,
+                config,
+                IconState.IDLE_RECOVERY,
+                rod_required_confidence=0.90,
+            )
+            self.assertTrue(engine.is_monitoring())
+            engine._process_frame(
+                365,
+                config,
+                IconState.IDLE_RECOVERY,
+                rod_required_confidence=0.91,
+            )
+
+        self.assertFalse(engine.is_monitoring())
+        error_events = [event for event in events if event.kind.value == "error"]
+        self.assertEqual(len(error_events), 1)
+        self.assertIn("必須配戴釣竿", error_events[0].message)
+        self.assertIn("监测已停止", error_events[0].message)
+
+    def test_inventory_full_notice_stops_after_two_confirmed_frames(self) -> None:
+        config = AppConfig()
+        events = []
+        engine = FishingEngine(events.append)
+        engine._enabled.set()  # type: ignore[attr-defined]
+        engine._unconfirmed_cast_attempts = 3  # type: ignore[attr-defined]
+
+        with patch("fishing_assistant.engine.record_error"):
+            engine._process_frame(
+                365,
+                config,
+                IconState.IDLE_RECOVERY,
+                inventory_full_confidence=0.90,
+            )
+            self.assertTrue(engine.is_monitoring())
+            engine._process_frame(
+                365,
+                config,
+                IconState.IDLE_RECOVERY,
+                inventory_full_confidence=0.91,
+            )
+
+        self.assertFalse(engine.is_monitoring())
+        error_events = [event for event in events if event.kind.value == "error"]
+        self.assertEqual(len(error_events), 1)
+        self.assertIn("請整理背包後再試一次", error_events[0].message)
+        self.assertIn("监测已停止", error_events[0].message)
 
     def test_escape_message_template_matches_scaled_game_notice(self) -> None:
         template = cv2.imread(str(FISH_ESCAPE_TEMPLATE_PATH), cv2.IMREAD_COLOR)

@@ -185,10 +185,10 @@ class MetricCard(QFrame):
         layout.setSpacing(3)
         self.value_label = QLabel(value)
         self.value_label.setObjectName("metricValue")
-        caption_label = QLabel(caption)
-        caption_label.setObjectName("metricCaption")
+        self.caption_label = QLabel(caption)
+        self.caption_label.setObjectName("metricCaption")
         layout.addWidget(self.value_label)
-        layout.addWidget(caption_label)
+        layout.addWidget(self.caption_label)
 
 
 class MainWindow(QMainWindow):
@@ -572,14 +572,49 @@ class MainWindow(QMainWindow):
         card_layout = QVBoxLayout(card)
         card_layout.setContentsMargins(24, 22, 24, 24)
         card_layout.setSpacing(18)
-        card_layout.addLayout(self._card_heading("识别参数", "这些参数预留给不同 UI 缩放、主题或未来识别策略使用。"))
+        card_layout.addLayout(
+            self._card_heading(
+                "识别参数",
+                "图标识别采用用户明确选择的独立方案；默认使用 OK 框架，不会自动混用旧像素规则。",
+            )
+        )
+
+        recognition_grid = QGridLayout()
+        recognition_grid.setHorizontalSpacing(18)
+        recognition_grid.setVerticalSpacing(8)
+        self.recognition_backend_combo = QComboBox()
+        self.recognition_backend_combo.addItem(
+            "OK 框架特征识别（推荐）", "ok"
+        )
+        self.recognition_backend_combo.addItem(
+            "旧版像素识别（兼容）", "pixel"
+        )
+        recognition_grid.addWidget(
+            self._form_label(
+                "图标识别模式",
+                "两种模式互不回退；钓鱼、骑马和状态图标默认由 OK FeatureSet 识别。",
+            ),
+            0,
+            0,
+        )
+        recognition_grid.addWidget(self.recognition_backend_combo, 1, 0)
+        recognition_grid.setColumnStretch(0, 1)
+        card_layout.addLayout(recognition_grid)
+        self.recognition_backend_hint = QLabel()
+        self.recognition_backend_hint.setObjectName("cardHint")
+        self.recognition_backend_hint.setWordWrap(True)
+        card_layout.addWidget(self.recognition_backend_hint)
 
         self.threshold_value = QLabel("1200 px")
         self.threshold_value.setObjectName("metricValue")
         self.threshold_slider = QSlider(Qt.Orientation.Horizontal)
         self.threshold_slider.setRange(400, 3000)
         threshold_header = QHBoxLayout()
-        threshold_header.addWidget(self._form_label("鱼体判定阈值", "高于抛竿图标的红色像素量才视为上钩"), 1)
+        self.threshold_header_label = self._form_label(
+            "旧像素模式：鱼体判定阈值",
+            "仅在选择旧版像素识别时生效；OK 模式使用图片特征相似度。",
+        )
+        threshold_header.addWidget(self.threshold_header_label, 1)
         threshold_header.addWidget(self.threshold_value)
         card_layout.addLayout(threshold_header)
         card_layout.addWidget(self.threshold_slider)
@@ -678,10 +713,10 @@ class MainWindow(QMainWindow):
         recovery_layout.setContentsMargins(24, 22, 24, 24)
         recovery_layout.setSpacing(15)
         recovery_layout.addLayout(
-            self._card_heading("自动恢复与续钓", "原地失效指针出现时，执行一次 W → S；图标稳定后自动按 Space。")
+            self._card_heading("自动恢复与续钓", "指南针出现时，执行一次 W → S；开始钓鱼图标出现后自动按 Space。")
         )
         self.auto_resume_check = QCheckBox("收鱼后自动按 Space 继续钓鱼")
-        self.auto_recover_check = QCheckBox("检测到原地失效状态时自动执行 W → S")
+        self.auto_recover_check = QCheckBox("检测到指南针状态时自动执行 W → S")
         recovery_layout.addWidget(self.auto_resume_check)
         recovery_layout.addWidget(self.auto_recover_check)
         recovery_grid = QGridLayout()
@@ -1017,6 +1052,7 @@ class MainWindow(QMainWindow):
             self.target_mode_combo,
             self.window_backend_combo,
             self.target_window_combo,
+            self.recognition_backend_combo,
             self.threshold_slider,
             self.roi_width_spin,
             self.roi_height_spin,
@@ -1040,6 +1076,9 @@ class MainWindow(QMainWindow):
         self._select_combo_data(self.mode_combo, config.display_mode)
         self._select_combo_data(self.target_mode_combo, config.capture_mode)
         self._select_combo_data(self.window_backend_combo, config.window_backend)
+        self._select_combo_data(
+            self.recognition_backend_combo, config.recognition_backend
+        )
         self._select_target_window(config.target_window_handle, config.target_window_title)
         self._select_combo_text(self.resolution_combo, config.selected_resolution)
         self.threshold_slider.setValue(config.fish_red_pixel_threshold)
@@ -1062,6 +1101,7 @@ class MainWindow(QMainWindow):
         del blockers
         self._sync_target_mode_controls()
         self._sync_catch_strategy_controls()
+        self._sync_recognition_backend_controls()
         self._refresh_threshold_display(config.fish_red_pixel_threshold)
     def _connect_controls(self) -> None:
         self.monitor_combo.currentIndexChanged.connect(self._save_profile)
@@ -1075,6 +1115,9 @@ class MainWindow(QMainWindow):
         self.start_button.clicked.connect(self._toggle_monitoring)
         self.snapshot_button.clicked.connect(self.engine.save_debug_capture)
         self.theme_button.clicked.connect(self._toggle_theme)
+        self.recognition_backend_combo.currentIndexChanged.connect(
+            self._recognition_backend_changed
+        )
         self.threshold_slider.valueChanged.connect(self._threshold_changed)
         self.roi_width_spin.valueChanged.connect(lambda value: self.engine.update_config(roi_width=value))
         self.roi_height_spin.valueChanged.connect(lambda value: self.engine.update_config(roi_height=value))
@@ -1176,6 +1219,44 @@ class MainWindow(QMainWindow):
     def _toggle_monitoring(self) -> None:
         self.engine.set_monitoring(not self.engine.is_monitoring())
 
+    def _recognition_backend_changed(self) -> None:
+        backend = str(self.recognition_backend_combo.currentData() or "ok")
+        self.engine.update_config(recognition_backend=backend)
+        self._sync_recognition_backend_controls()
+        mode_name = "OK 框架特征识别" if backend == "ok" else "旧版像素识别"
+        self._append_log(
+            f"图标识别模式已切换为“{mode_name}”；两种模式不会自动互相回退。",
+            EventKind.INFO,
+        )
+
+    def _sync_recognition_backend_controls(self) -> None:
+        use_pixel = self.recognition_backend_combo.currentData() == "pixel"
+        for control in (
+            self.threshold_header_label,
+            self.threshold_value,
+            self.threshold_slider,
+            self.idle_min_spin,
+            self.idle_max_spin,
+        ):
+            control.setEnabled(use_pixel)
+        if use_pixel:
+            self.recognition_backend_hint.setText(
+                "当前使用旧版像素兼容模式：根据红、白、绿、蓝、棕色像素判断图标；不会调用 OK 图标模板。"
+            )
+            self.red_metric.caption_label.setText("当前红色像素")
+            self.red_metric.value_label.setText("0 px")
+            self.red_progress.setMaximum(
+                max(1, self.engine.config().fish_red_pixel_threshold)
+            )
+        else:
+            self.recognition_backend_hint.setText(
+                "当前使用 OK 框架：钓鱼、上钩、指南针和骑马图标均由 FeatureSet 图片特征识别；低于阈值时判为未识别，不会退回像素规则。"
+            )
+            self.red_metric.caption_label.setText("OK 特征相似度")
+            self.red_metric.value_label.setText("等待识别")
+            self.red_progress.setMaximum(1000)
+        self.red_progress.setValue(0)
+
     def _threshold_changed(self, value: int) -> None:
         self.engine.update_config(fish_red_pixel_threshold=value)
         self._refresh_threshold_display(value)
@@ -1183,6 +1264,7 @@ class MainWindow(QMainWindow):
     def _restore_recommended_settings(self) -> None:
         defaults = default_config()
         self.engine.update_config(
+            recognition_backend=defaults.recognition_backend,
             roi_width=defaults.roi_width,
             roi_height=defaults.roi_height,
             poll_interval_ms=defaults.poll_interval_ms,
@@ -1328,14 +1410,23 @@ class MainWindow(QMainWindow):
             self._set_status("idle", "●  已校准，待启动")
     def _refresh_threshold_display(self, threshold: int) -> None:
         self.threshold_value.setText(f"{threshold} px")
-        self.red_progress.setMaximum(max(1, threshold))
+        if self.recognition_backend_combo.currentData() == "pixel":
+            self.red_progress.setMaximum(max(1, threshold))
 
     def _consume_engine_event(self, event: EngineEvent) -> None:
         if event.kind == EventKind.METRIC:
-            self.red_metric.value_label.setText(f"{event.red_pixels} px")
-            maximum = max(1, self.engine.config().fish_red_pixel_threshold)
-            self.red_progress.setMaximum(maximum)
-            self.red_progress.setValue(min(event.red_pixels, maximum))
+            if event.recognition_source == "ok_feature":
+                confidence = max(0.0, min(1.0, event.recognition_confidence))
+                self.red_metric.caption_label.setText("OK 特征相似度")
+                self.red_metric.value_label.setText(f"{confidence * 100:.1f}%")
+                self.red_progress.setMaximum(1000)
+                self.red_progress.setValue(round(confidence * 1000))
+            else:
+                self.red_metric.caption_label.setText("当前红色像素")
+                self.red_metric.value_label.setText(f"{event.red_pixels} px")
+                maximum = max(1, self.engine.config().fish_red_pixel_threshold)
+                self.red_progress.setMaximum(maximum)
+                self.red_progress.setValue(min(event.red_pixels, maximum))
             if event.waiting_for_bounce:
                 if event.catch_strategy == "fixed_delay":
                     total = max(1, self.engine.config().fallback_collect_delay_seconds)

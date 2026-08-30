@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 from typing import Callable
@@ -14,11 +14,18 @@ import mss
 import numpy as np
 import pyautogui
 from pynput import keyboard
+from ok.feature.FeatureSet import FeatureSet
 
 from . import window_target
 
 from .config import DEBUG_IMAGE_PATH, AppConfig, load_config, save_config
-from .constants import FISH_ESCAPE_TEMPLATE_PATH
+from .constants import (
+    FISH_ESCAPE_TEMPLATE_PATH,
+    INVENTORY_FULL_ICON_TEMPLATE_PATH,
+    INVENTORY_FULL_TEMPLATE_PATH,
+    OK_ICON_TEMPLATE_PATHS,
+    ROD_REQUIRED_TEMPLATE_PATH,
+)
 from .diagnostics import record_error
 
 
@@ -50,6 +57,8 @@ class IconColorSignals:
     green_ratio: float
     blue_ratio: float
     brown_ratio: float
+    recognition_source: str = "compat_pixel"
+    recognition_confidence: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +74,8 @@ class EngineEvent:
     kind: EventKind
     message: str
     red_pixels: int = 0
+    recognition_source: str = ""
+    recognition_confidence: float = 0.0
     fish_visible: bool = False
     monitoring: bool = False
     icon_state: IconState = IconState.NORMAL
@@ -85,7 +96,25 @@ class FishingEngine:
     ESCAPE_MESSAGE_MATCH_THRESHOLD = 0.68
     ESCAPE_MESSAGE_WATCH_SECONDS = 2.8
     CAST_TRANSITION_GRACE_SECONDS = 1.5
+    OK_ICON_MATCH_THRESHOLD = 0.86
+    OK_ICON_MATCH_MARGIN = 0.04
+    OK_IDLE_ROTATED_MATCH_THRESHOLD = 0.79
+    OK_IDLE_ROTATED_MATCH_MARGIN = 0.025
+    OK_ICON_NORMALIZED_WIDTH = 160
+    STARTUP_IDLE_CONFIRM_FRAMES = 2
+    ROD_REQUIRED_MATCH_THRESHOLD = 0.72
+    INVENTORY_FULL_MATCH_THRESHOLD = 0.70
+    INVENTORY_FULL_ICON_MATCH_THRESHOLD = 0.82
+    BLOCKING_MESSAGE_RETRY_THRESHOLD = 3
+    BLOCKING_MESSAGE_CONFIRM_FRAMES = 2
+    BLOCKING_MESSAGE_SCAN_INTERVAL_SECONDS = 0.16
     _escape_template_mask: np.ndarray | None = None
+    _rod_required_template_mask: np.ndarray | None = None
+    _inventory_full_template_mask: np.ndarray | None = None
+    _inventory_full_icon_template: np.ndarray | None = None
+    _ok_feature_set: FeatureSet | None = None
+    _ok_icon_templates: dict[str, np.ndarray] | None = None
+    _ok_idle_rotated_templates: tuple[np.ndarray, ...] | None = None
 
     def __init__(self, event_callback: EventCallback | None = None) -> None:
         self._config = load_config()
@@ -102,6 +131,7 @@ class FishingEngine:
         self._idle_frames = 0
         self._pending_recast_at: float | None = None
         self._pending_recast_reason = ""
+        self._startup_probe_active = False
         self._last_press_at = 0.0
         self._last_recovery_at = 0.0
         self._last_metric_at = 0.0
@@ -127,10 +157,18 @@ class FishingEngine:
         self._escape_candidate_stamina_seen = False
         self._escape_message_latched = False
         self._last_escape_scan_at = 0.0
+        self._unconfirmed_cast_attempts = 0
+        self._recovery_attempts_without_success = 0
+        self._rod_required_hits = 0
+        self._inventory_full_hits = 0
+        self._blocking_message_scan_announced = False
+        self._last_blocking_message_scan_at = 0.0
+        self._last_blocking_message_warning_at = 0.0
         self._last_stamina_scan_at = 0.0
         self._last_stamina_warning_at = 0.0
         self._last_stamina_missing_log_at = 0.0
         self._last_logged_icon_state: IconState | None = None
+        self._last_logged_recognition_source = ""
         self._last_background_hover_at = 0.0
 
     def set_event_callback(self, callback: EventCallback | None) -> None:
@@ -201,6 +239,7 @@ class FishingEngine:
             message = f"F7 已校准钓鱼按钮中心：({x}, {y})；已直接记录，鼠标位置未移动。"
         self._reset_detection()
         if self._enabled.is_set():
+            self._startup_probe_active = True
             self._schedule_recast(
                 time.monotonic(), self.config(), "重新校准完成"
             )
@@ -223,6 +262,7 @@ class FishingEngine:
                 return False
         self._reset_detection()
         if enabled:
+            self._startup_probe_active = True
             self._prepare_stamina_view(config)
             if config.capture_mode == "window":
                 target = self._resolve_target_window(config)
@@ -344,7 +384,22 @@ class FishingEngine:
     def classify_frame_state(
         cls, bgr: np.ndarray, config: AppConfig
     ) -> tuple[IconState, IconColorSignals]:
-        """先识别白马与马鞍组合，再沿用钓鱼红色像素状态判断。"""
+        """根据用户选择独立运行 OK 特征或旧像素识别。"""
+        if config.recognition_backend != "pixel":
+            # OK 模式是独立识别方案；不计算旧像素信号，也绝不调用像素规则。
+            signals = IconColorSignals(0, 0.0, 0.0, 0.0, 0.0, 0.0)
+            try:
+                state, best_confidence, _second_confidence = (
+                    cls.ok_icon_state_match(bgr)
+                )
+            except Exception:
+                state, best_confidence = None, 0.0
+            return state or IconState.NORMAL, replace(
+                signals,
+                recognition_source="ok_feature",
+                recognition_confidence=best_confidence,
+            )
+
         signals = cls.analyze_icon_colors(bgr)
         is_horse_icon = (
             signals.white_ratio >= 0.10
@@ -446,75 +501,375 @@ class FishingEngine:
         )
 
     @classmethod
-    def _load_escape_template_mask(cls) -> np.ndarray | None:
-        if cls._escape_template_mask is not None:
-            return cls._escape_template_mask
-        template = cv2.imread(str(FISH_ESCAPE_TEMPLATE_PATH), cv2.IMREAD_COLOR)
+    def _load_text_template(cls, path: Path) -> np.ndarray | None:
+        template = cv2.imread(str(path), cv2.IMREAD_COLOR)
         if template is None:
             return None
+        # 颜色仅用于从静态素材中裁出文字；运行时识别交给 OK FeatureSet。
         mask = cls._white_text_mask(template)
         points = cv2.findNonZero(mask)
         if points is None:
             return None
         x, y, width, height = cv2.boundingRect(points)
-        cls._escape_template_mask = mask[y : y + height, x : x + width]
+        padding = 8
+        left = max(0, x - padding)
+        top = max(0, y - padding)
+        right = min(template.shape[1], x + width + padding)
+        bottom = min(template.shape[0], y + height + padding)
+        return template[top:bottom, left:right, :3]
+
+    @classmethod
+    def _load_escape_template_mask(cls) -> np.ndarray | None:
+        if cls._escape_template_mask is None:
+            cls._escape_template_mask = cls._load_text_template(
+                FISH_ESCAPE_TEMPLATE_PATH
+            )
         return cls._escape_template_mask
 
     @classmethod
-    def fish_escape_message_confidence(cls, bgr: np.ndarray) -> float:
-        """用固定文字模板识别“猶豫了一下，結果讓牠跑掉了……”提示。"""
-        if bgr.ndim != 3 or bgr.shape[0] < 40 or bgr.shape[1] < 320:
-            return 0.0
-        template = cls._load_escape_template_mask()
-        if template is None:
+    def _load_rod_required_template_mask(cls) -> np.ndarray | None:
+        if cls._rod_required_template_mask is None:
+            cls._rod_required_template_mask = cls._load_text_template(
+                ROD_REQUIRED_TEMPLATE_PATH
+            )
+        return cls._rod_required_template_mask
+
+    @classmethod
+    def _load_inventory_full_template_mask(cls) -> np.ndarray | None:
+        if cls._inventory_full_template_mask is None:
+            cls._inventory_full_template_mask = cls._load_text_template(
+                INVENTORY_FULL_TEMPLATE_PATH
+            )
+        return cls._inventory_full_template_mask
+
+    @classmethod
+    def _get_ok_feature_set(cls) -> FeatureSet:
+        if cls._ok_feature_set is None:
+            cls._ok_feature_set = FeatureSet(
+                False,
+                "__direct_templates__.json",
+                default_horizontal_variance=0,
+                default_vertical_variance=0,
+                default_threshold=0.80,
+            )
+        return cls._ok_feature_set
+
+    @classmethod
+    def _ok_multiscale_confidence(
+        cls,
+        bgr: np.ndarray,
+        template: np.ndarray | None,
+        *,
+        search_top_ratio: float,
+        search_bottom_ratio: float,
+        scales: np.ndarray,
+        normalized_width: int,
+        baseline_scale: float,
+        category_name: str,
+        use_gray_scale: bool = True,
+    ) -> float:
+        """通过 OK FeatureSet 在指定区域执行多尺度灰度模板识别。"""
+        if (
+            template is None
+            or bgr.ndim != 3
+            or bgr.shape[0] < 20
+            or bgr.shape[1] < 20
+        ):
             return 0.0
 
         frame_height, frame_width = bgr.shape[:2]
-        # 提示出现在画面下方；只扫描下方约四分之三，减少其他白色 UI 的干扰。
-        search = bgr[int(frame_height * 0.25) :, :, :3]
-        search_mask = cls._white_text_mask(search)
-        normalized_width = 960
         normalized_height = max(
-            1, round(search_mask.shape[0] * normalized_width / frame_width)
+            1, round(frame_height * normalized_width / frame_width)
         )
-        search_mask = cv2.resize(
-            search_mask,
+        normalized = cv2.resize(
+            bgr[:, :, :3],
             (normalized_width, normalized_height),
             interpolation=cv2.INTER_AREA,
         )
-        search_mask = cv2.GaussianBlur(search_mask, (3, 3), 0)
         baseline = cv2.resize(
             template,
             (
-                max(1, round(template.shape[1] * 0.5)),
-                max(1, round(template.shape[0] * 0.5)),
+                max(1, round(template.shape[1] * baseline_scale)),
+                max(1, round(template.shape[0] * baseline_scale)),
             ),
             interpolation=cv2.INTER_AREA,
         )
-        baseline = cv2.GaussianBlur(baseline, (3, 3), 0)
-
+        search_height = max(
+            1,
+            round(normalized_height * (search_bottom_ratio - search_top_ratio)),
+        )
+        feature_set = cls._get_ok_feature_set()
         best = 0.0
-        for scale in np.linspace(0.80, 1.20, 9):
+        for scale in scales:
             candidate = cv2.resize(
                 baseline,
                 (
-                    max(1, round(baseline.shape[1] * scale)),
-                    max(1, round(baseline.shape[0] * scale)),
+                    max(1, round(baseline.shape[1] * float(scale))),
+                    max(1, round(baseline.shape[0] * float(scale))),
                 ),
                 interpolation=cv2.INTER_AREA,
             )
-            candidate = cv2.GaussianBlur(candidate, (3, 3), 0)
             if (
-                candidate.shape[0] > search_mask.shape[0]
-                or candidate.shape[1] > search_mask.shape[1]
+                candidate.shape[0] > search_height
+                or candidate.shape[1] > normalized_width
             ):
                 continue
-            score_map = cv2.matchTemplate(
-                search_mask, candidate, cv2.TM_CCOEFF_NORMED
+            boxes = feature_set.find_one_feature(
+                mat=normalized,
+                category_name=category_name,
+                threshold=-1.0,
+                use_gray_scale=use_gray_scale,
+                x=0.0,
+                y=search_top_ratio,
+                width=1.0,
+                height=search_bottom_ratio - search_top_ratio,
+                template=candidate,
+                limit=1,
             )
-            if score_map.size:
-                best = max(best, float(score_map.max()))
+            if boxes:
+                best = max(best, float(boxes[0].confidence))
         return best
+
+    @classmethod
+    def _text_template_confidence(
+        cls,
+        bgr: np.ndarray,
+        template: np.ndarray | None,
+        *,
+        search_top_ratio: float,
+        search_bottom_ratio: float,
+        scales: np.ndarray,
+    ) -> float:
+        return cls._ok_multiscale_confidence(
+            bgr,
+            template,
+            search_top_ratio=search_top_ratio,
+            search_bottom_ratio=search_bottom_ratio,
+            scales=scales,
+            normalized_width=960,
+            baseline_scale=0.5,
+            category_name="runtime_text_template",
+        )
+    @classmethod
+    def fish_escape_message_confidence(cls, bgr: np.ndarray) -> float:
+        """用固定文字模板识别“猶豫了一下，結果讓牠跑掉了……”提示。"""
+        return cls._text_template_confidence(
+            bgr,
+            cls._load_escape_template_mask(),
+            search_top_ratio=0.25,
+            search_bottom_ratio=1.0,
+            scales=np.linspace(0.80, 1.20, 9),
+        )
+
+    @classmethod
+    def rod_required_message_confidence(cls, bgr: np.ndarray) -> float:
+        """识别画面上方的“必須配戴釣竿。”提示。"""
+        return cls._text_template_confidence(
+            bgr,
+            cls._load_rod_required_template_mask(),
+            search_top_ratio=0.0,
+            search_bottom_ratio=0.45,
+            scales=np.linspace(0.75, 1.30, 12),
+        )
+
+    @classmethod
+    def inventory_full_message_confidence(cls, bgr: np.ndarray) -> float:
+        """识别画面上方的“請整理背包後再試一次。”提示。"""
+        return cls._text_template_confidence(
+            bgr,
+            cls._load_inventory_full_template_mask(),
+            search_top_ratio=0.0,
+            search_bottom_ratio=0.45,
+            scales=np.linspace(0.75, 1.30, 12),
+        )
+
+    @classmethod
+    def _load_inventory_full_icon_template(cls) -> np.ndarray | None:
+        if cls._inventory_full_icon_template is None:
+            image = cv2.imread(
+                str(INVENTORY_FULL_ICON_TEMPLATE_PATH), cv2.IMREAD_COLOR
+            )
+            if image is not None:
+                height, width = image.shape[:2]
+                # 静态样本左侧为红圈背包；排除右侧钓鱼按钮与大部分地面。
+                cls._inventory_full_icon_template = image[
+                    round(height * 0.18) : round(height * 0.94),
+                    0 : round(width * 0.38),
+                    :3,
+                ]
+        return cls._inventory_full_icon_template
+
+    @classmethod
+    def inventory_full_icon_confidence(cls, bgr: np.ndarray) -> float:
+        """用 OK 彩色特征识别钓鱼按钮左侧的红圈背包。"""
+        return cls._ok_multiscale_confidence(
+            bgr,
+            cls._load_inventory_full_icon_template(),
+            search_top_ratio=0.25,
+            search_bottom_ratio=1.0,
+            scales=np.linspace(0.70, 1.35, 14),
+            normalized_width=960,
+            baseline_scale=0.5,
+            category_name="inventory_full_icon",
+            use_gray_scale=False,
+        )
+
+    @classmethod
+    def _load_ok_icon_template(cls, path: Path) -> np.ndarray | None:
+        image = cv2.imread(str(path), cv2.IMREAD_COLOR)
+        if image is None:
+            return None
+        # 只从静态样本中裁出圆形按钮核心，排除动态地面和 Space 标签。
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        green = cv2.inRange(hsv, np.array([35, 45, 55]), np.array([100, 255, 255]))
+        blue = cv2.inRange(hsv, np.array([90, 45, 55]), np.array([132, 255, 255]))
+        mask = cv2.bitwise_or(green, blue)
+        mask = cv2.morphologyEx(
+            mask, cv2.MORPH_CLOSE, np.ones((7, 7), dtype=np.uint8)
+        )
+        count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(mask)
+        if count <= 1:
+            return image[:, :, :3]
+        component = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+        x, y, width, height = (int(value) for value in stats[component, :4])
+        left = x + round(width * 0.12)
+        right = x + round(width * 0.86)
+        top = y + round(height * 0.08)
+        bottom = y + round(height * 0.90)
+        if right <= left or bottom <= top:
+            return image[:, :, :3]
+        return image[top:bottom, left:right, :3]
+
+    @classmethod
+    def _get_ok_icon_templates(cls) -> dict[str, np.ndarray]:
+        if cls._ok_icon_templates is None:
+            templates: dict[str, np.ndarray] = {}
+            for state_name, path in OK_ICON_TEMPLATE_PATHS.items():
+                template = cls._load_ok_icon_template(path)
+                if template is not None:
+                    templates[state_name] = template
+            cls._ok_icon_templates = templates
+        return cls._ok_icon_templates
+
+    @staticmethod
+    def _rotate_ok_template(template: np.ndarray, angle: float) -> np.ndarray:
+        height, width = template.shape[:2]
+        matrix = cv2.getRotationMatrix2D(
+            (width / 2.0, height / 2.0), angle, 1.0
+        )
+        return cv2.warpAffine(
+            template,
+            matrix,
+            (width, height),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_REFLECT_101,
+        )
+
+    @classmethod
+    def _get_ok_idle_rotated_templates(cls) -> tuple[np.ndarray, ...]:
+        if cls._ok_idle_rotated_templates is None:
+            base = cls._get_ok_icon_templates().get("idle_recovery")
+            if base is None:
+                cls._ok_idle_rotated_templates = ()
+            else:
+                height, width = base.shape[:2]
+                side = max(height, width)
+                top = (side - height) // 2
+                bottom = side - height - top
+                left = (side - width) // 2
+                right = side - width - left
+                square = cv2.copyMakeBorder(
+                    base,
+                    top,
+                    bottom,
+                    left,
+                    right,
+                    cv2.BORDER_REFLECT_101,
+                )
+                cls._ok_idle_rotated_templates = tuple(
+                    cls._rotate_ok_template(square, angle)
+                    for angle in range(0, 360, 15)
+                )
+        return cls._ok_idle_rotated_templates
+
+    @classmethod
+    def ok_icon_state_match(
+        cls, bgr: np.ndarray
+    ) -> tuple[IconState | None, float, float]:
+        """返回 OK 状态及分数；未过阈值时保留分数但状态为空。"""
+        scores: list[tuple[IconState, float]] = []
+        for state_name, template in cls._get_ok_icon_templates().items():
+            try:
+                confidence = cls._ok_multiscale_confidence(
+                    bgr,
+                    template,
+                    search_top_ratio=0.0,
+                    search_bottom_ratio=1.0,
+                    scales=np.linspace(0.78, 1.28, 11),
+                    normalized_width=cls.OK_ICON_NORMALIZED_WIDTH,
+                    baseline_scale=1.0,
+                    category_name=f"icon_{state_name}",
+                )
+                scores.append((IconState(state_name), confidence))
+            except (ValueError, cv2.error):
+                continue
+        if not scores:
+            return None, 0.0, 0.0
+        scores.sort(key=lambda item: item[1], reverse=True)
+        best_state, best_confidence = scores[0]
+        second_confidence = scores[1][1] if len(scores) > 1 else 0.0
+        if (
+            best_confidence >= cls.OK_ICON_MATCH_THRESHOLD
+            and best_confidence - second_confidence >= cls.OK_ICON_MATCH_MARGIN
+        ):
+            return best_state, best_confidence, second_confidence
+
+        # 指南针指针会随人物方向旋转。普通模板未过门槛时，再用旋转模板复核；
+        # 仍由 OK FeatureSet 完成匹配，不借用旧像素规则。
+        idle_confidence = max(
+            (
+                confidence
+                for state, confidence in scores
+                if state == IconState.IDLE_RECOVERY
+            ),
+            default=0.0,
+        )
+        for index, template in enumerate(cls._get_ok_idle_rotated_templates()):
+            try:
+                idle_confidence = max(
+                    idle_confidence,
+                    cls._ok_multiscale_confidence(
+                        bgr,
+                        template,
+                        search_top_ratio=0.0,
+                        search_bottom_ratio=1.0,
+                        scales=np.array([0.70, 0.78, 0.86, 0.92, 0.98]),
+                        normalized_width=cls.OK_ICON_NORMALIZED_WIDTH,
+                        baseline_scale=1.0,
+                        category_name=f"icon_idle_rotated_{index}",
+                    ),
+                )
+            except (ValueError, cv2.error):
+                continue
+        non_idle_confidence = max(
+            (
+                confidence
+                for state, confidence in scores
+                if state != IconState.IDLE_RECOVERY
+            ),
+            default=0.0,
+        )
+        if (
+            idle_confidence >= cls.OK_IDLE_ROTATED_MATCH_THRESHOLD
+            and idle_confidence - non_idle_confidence
+            >= cls.OK_IDLE_ROTATED_MATCH_MARGIN
+        ):
+            return (
+                IconState.IDLE_RECOVERY,
+                idle_confidence,
+                non_idle_confidence,
+            )
+        return None, max(best_confidence, idle_confidence), second_confidence
 
     def _on_key_press(
         self, key: keyboard.Key | keyboard.KeyCode | None
@@ -554,6 +909,8 @@ class FishingEngine:
                     strategy = self._catch_strategy(config)
                     stamina_sample = None
                     escape_message_confidence = 0.0
+                    rod_required_confidence: float | None = None
+                    inventory_full_confidence: float | None = None
                     if (
                         icon_state == IconState.FISH_HOOKED
                         and strategy == "stamina_bounce"
@@ -570,12 +927,30 @@ class FishingEngine:
                                 screen, config, loop_now
                             )
                         )
+                    if (
+                        icon_state not in (IconState.WAITING_BITE, IconState.FISH_HOOKED)
+                        and self._should_scan_blocking_messages()
+                    ):
+                        blocking_confidences = (
+                            self._capture_blocking_message_confidences(
+                                screen, config, loop_now
+                            )
+                        )
+                        if blocking_confidences is not None:
+                            (
+                                rod_required_confidence,
+                                inventory_full_confidence,
+                            ) = blocking_confidences
                     self._process_frame(
                         signals.red_pixels,
                         config,
                         icon_state,
                         stamina_sample,
                         escape_message_confidence,
+                        rod_required_confidence,
+                        inventory_full_confidence,
+                        signals.recognition_source,
+                        signals.recognition_confidence,
                     )
                 except Exception as error:  # pragma: no cover - 显示器环境差异
                     self._enabled.clear()
@@ -614,7 +989,7 @@ class FishingEngine:
     def _capture_stamina_frame(
         self, screen: mss.MSS | None, config: AppConfig
     ) -> np.ndarray:
-        """仅在上钩期间取得完整游戏画面，以搜索不固定位置的体力条。"""
+        """取得完整游戏画面，供动态体力条和全局提示扫描复用。"""
         if config.capture_mode == "window":
             target = self._resolve_target_window(config)
             self._maintain_background_hover(target, config)
@@ -677,6 +1052,54 @@ class FishingEngine:
             )
         return confidence
 
+    def _capture_blocking_message_confidences(
+        self, screen: mss.MSS | None, config: AppConfig, now: float
+    ) -> tuple[float, float] | None:
+        if (
+            now - self._last_blocking_message_scan_at
+            < self.BLOCKING_MESSAGE_SCAN_INTERVAL_SECONDS
+        ):
+            return None
+        self._last_blocking_message_scan_at = now
+        try:
+            frame = self._capture_stamina_frame(screen, config)
+        except Exception as error:  # pragma: no cover - 由实际窗口捕捉环境决定
+            if now - self._last_blocking_message_warning_at >= 3.0:
+                self._emit(EventKind.WARNING, f"无法扫描钓鱼阻塞提示：{error}")
+                self._last_blocking_message_warning_at = now
+            return None
+
+        bgr = frame[:, :, :3]
+        rod_confidence = self.rod_required_message_confidence(bgr)
+        inventory_text_confidence = self.inventory_full_message_confidence(bgr)
+        inventory_icon_confidence = self.inventory_full_icon_confidence(bgr)
+        inventory_confidence = inventory_text_confidence
+        if inventory_icon_confidence >= self.INVENTORY_FULL_ICON_MATCH_THRESHOLD:
+            inventory_confidence = max(
+                inventory_confidence, inventory_icon_confidence
+            )
+        if rod_confidence >= self.ROD_REQUIRED_MATCH_THRESHOLD:
+            self._emit(
+                EventKind.INFO,
+                f"鱼竿状态文字由 OK 特征识别命中：相似度 {rod_confidence:.3f}。",
+                monitoring=True,
+            )
+        if inventory_text_confidence >= self.INVENTORY_FULL_MATCH_THRESHOLD:
+            self._emit(
+                EventKind.INFO,
+                "背包已满文字由 OK 特征识别命中："
+                f"相似度 {inventory_text_confidence:.3f}。",
+                monitoring=True,
+            )
+        if inventory_icon_confidence >= self.INVENTORY_FULL_ICON_MATCH_THRESHOLD:
+            self._emit(
+                EventKind.INFO,
+                "红色背包图标由 OK 彩色特征识别命中："
+                f"相似度 {inventory_icon_confidence:.3f}。",
+                monitoring=True,
+            )
+        return rod_confidence, inventory_confidence
+
     def _resolve_target_window(self, config: AppConfig) -> window_target.WindowInfo:
         target = window_target.resolve_window(
             config.target_window_handle, config.target_window_title
@@ -711,28 +1134,63 @@ class FishingEngine:
         icon_state: IconState | None = None,
         stamina_sample: StaminaBarSample | None = None,
         escape_message_confidence: float = 0.0,
+        rod_required_confidence: float | None = None,
+        inventory_full_confidence: float | None = None,
+        recognition_source: str | None = None,
+        recognition_confidence: float = 0.0,
     ) -> None:
+        if recognition_source is None:
+            recognition_source = (
+                "compat_pixel"
+                if config.recognition_backend == "pixel"
+                else "ok_feature"
+            )
         if icon_state is None:
-            icon_state = self.classify_icon_state(red_pixels, config)
+            icon_state = (
+                self.classify_icon_state(red_pixels, config)
+                if config.recognition_backend == "pixel"
+                else IconState.NORMAL
+            )
         fish_visible = icon_state == IconState.FISH_HOOKED
         now = time.monotonic()
 
-        if icon_state != self._last_logged_icon_state:
+        if (
+            icon_state != self._last_logged_icon_state
+            or recognition_source != self._last_logged_recognition_source
+        ):
             state_name = {
                 IconState.NORMAL: "未分类普通图标",
                 IconState.READY_TO_CAST: "可抛竿鱼竿图标",
                 IconState.WAITING_BITE: "等待上钩图标",
                 IconState.FISH_HOOKED: "上钩图标",
-                IconState.IDLE_RECOVERY: "原地失效图标",
+                IconState.IDLE_RECOVERY: "指南针图标",
                 IconState.HORSE_MOUNT_PROMPT: "骑马图标",
                 IconState.HORSE_DISMOUNT_PROMPT: "下马图标",
             }[icon_state]
+            if recognition_source == "ok_feature":
+                recognition_detail = (
+                    f"OK 特征，相似度 {recognition_confidence:.3f}"
+                )
+            else:
+                recognition_detail = (
+                    "兼容像素，"
+                    f"红色像素 {red_pixels}，阈值 {config.fish_red_pixel_threshold}"
+                )
             self._emit(
                 EventKind.INFO,
-                f"图标状态切换为“{state_name}”：红色像素 {red_pixels}，阈值 {config.fish_red_pixel_threshold}，连续上钩帧 {self._red_frames + (1 if fish_visible else 0)}。",
+                f"图标状态切换为“{state_name}”：识别来源 {recognition_detail}，"
+                f"连续上钩帧 {self._red_frames + (1 if fish_visible else 0)}。",
                 monitoring=True,
             )
             self._last_logged_icon_state = icon_state
+            self._last_logged_recognition_source = recognition_source
+
+        if icon_state in (IconState.WAITING_BITE, IconState.FISH_HOOKED):
+            self._clear_failed_start_tracking()
+        elif self._handle_blocking_messages(
+            rod_required_confidence, inventory_full_confidence
+        ):
+            return
 
         if self._handle_horse_icon(icon_state, config, now):
             return
@@ -750,6 +1208,39 @@ class FishingEngine:
                 self._idle_frames += 1
             else:
                 self._idle_frames = 0
+
+        if self._startup_probe_active:
+            if icon_state == IconState.READY_TO_CAST:
+                self._startup_probe_active = False
+                self._emit(
+                    EventKind.INFO,
+                    "启动探测识别到开始钓鱼图标，准备直接按 Space。",
+                    monitoring=True,
+                )
+            elif icon_state in (IconState.WAITING_BITE, IconState.FISH_HOOKED):
+                self._startup_probe_active = False
+                self._pending_recast_at = None
+                self._pending_recast_reason = ""
+                self._emit(
+                    EventKind.INFO,
+                    "启动探测确认当前已经在钓鱼，不发送额外按键。",
+                    monitoring=True,
+                )
+            elif (
+                config.auto_recover_idle
+                and icon_state == IconState.IDLE_RECOVERY
+                and self._idle_frames
+                >= min(
+                    self.STARTUP_IDLE_CONFIRM_FRAMES,
+                    max(1, config.recovery_consecutive_frames),
+                )
+            ):
+                self._startup_probe_active = False
+                self._recover_idle_state(config, startup=True)
+                self._schedule_recast(
+                    time.monotonic(), config, "启动指南针移动恢复完成"
+                )
+                return
 
         if (
             not self._waiting_for_clear
@@ -836,6 +1327,8 @@ class FishingEngine:
                 EventKind.METRIC,
                 self._metric_message(icon_state, now, config),
                 red_pixels=red_pixels,
+                recognition_source=recognition_source,
+                recognition_confidence=recognition_confidence,
                 fish_visible=fish_visible,
                 monitoring=True,
                 icon_state=icon_state,
@@ -864,9 +1357,21 @@ class FishingEngine:
             "fixed_delay": f"模式 2（{config.fallback_collect_delay_seconds} 秒定时）",
             "instant": "模式 3（上钩立即收杆）",
         }[self._catch_strategy(config)]
+        icon_recognizer = (
+            "OK FeatureSet 图片特征（不回退像素）"
+            if config.recognition_backend != "pixel"
+            else "旧版像素兼容模式"
+        )
+        pixel_detail = (
+            f"；鱼体阈值 {config.fish_red_pixel_threshold} px"
+            if config.recognition_backend == "pixel"
+            else ""
+        )
         common = (
-            f"策略 {strategy}；识别区域 {config.roi_width}×{config.roi_height}；"
-            f"轮询 {config.poll_interval_ms} ms；鱼体阈值 {config.fish_red_pixel_threshold} px。"
+            f"策略 {strategy}；图标识别 {icon_recognizer}；"
+            "异常提示识别 OK FeatureSet；"
+            f"识别区域 {config.roi_width}×{config.roi_height}；"
+            f"轮询 {config.poll_interval_ms} ms{pixel_detail}。"
         )
         if config.capture_mode == "window":
             backend = "OK WGC" if config.window_backend == "ok" else "PrintWindow"
@@ -1203,7 +1708,7 @@ class FishingEngine:
             IconState.READY_TO_CAST: "检测到可抛竿鱼竿图标，准备立即续钓",
             IconState.WAITING_BITE: "已经抛竿，正在等待上钩",
             IconState.FISH_HOOKED: "检测到上钩图标",
-            IconState.IDLE_RECOVERY: "检测到原地失效状态，准备移动恢复",
+            IconState.IDLE_RECOVERY: "检测到指南针状态，准备移动恢复",
             IconState.HORSE_MOUNT_PROMPT: "检测到骑马图标，已阻止自动按键",
             IconState.HORSE_DISMOUNT_PROMPT: "检测到下马图标，正在恢复钓鱼状态",
         }[icon_state]
@@ -1254,6 +1759,88 @@ class FishingEngine:
         self._horse_guard_state = None
         return False
 
+    def _should_scan_blocking_messages(self) -> bool:
+        return (
+            self._unconfirmed_cast_attempts >= self.BLOCKING_MESSAGE_RETRY_THRESHOLD
+            or self._recovery_attempts_without_success
+            >= self.BLOCKING_MESSAGE_RETRY_THRESHOLD
+        )
+
+    def _announce_blocking_message_scan_if_needed(self) -> None:
+        if not self._should_scan_blocking_messages() or self._blocking_message_scan_announced:
+            return
+        self._blocking_message_scan_announced = True
+        self._emit(
+            EventKind.WARNING,
+            "多次尝试后仍未进入等待上钩状态，开始通过 OK 检查画面上方的鱼竿和背包提示。",
+            monitoring=True,
+        )
+
+    def _clear_failed_start_tracking(self) -> None:
+        self._unconfirmed_cast_attempts = 0
+        self._recovery_attempts_without_success = 0
+        self._rod_required_hits = 0
+        self._inventory_full_hits = 0
+        self._blocking_message_scan_announced = False
+        self._last_blocking_message_scan_at = 0.0
+
+    def _handle_blocking_messages(
+        self,
+        rod_confidence: float | None,
+        inventory_confidence: float | None,
+    ) -> bool:
+        if rod_confidence is not None:
+            if rod_confidence >= self.ROD_REQUIRED_MATCH_THRESHOLD:
+                self._rod_required_hits += 1
+            else:
+                self._rod_required_hits = 0
+        if inventory_confidence is not None:
+            if inventory_confidence >= self.INVENTORY_FULL_MATCH_THRESHOLD:
+                self._inventory_full_hits += 1
+            else:
+                self._inventory_full_hits = 0
+
+        confirmed: list[tuple[str, float]] = []
+        if (
+            rod_confidence is not None
+            and self._rod_required_hits >= self.BLOCKING_MESSAGE_CONFIRM_FRAMES
+        ):
+            confirmed.append(("rod_required", rod_confidence))
+        if (
+            inventory_confidence is not None
+            and self._inventory_full_hits >= self.BLOCKING_MESSAGE_CONFIRM_FRAMES
+        ):
+            confirmed.append(("inventory_full", inventory_confidence))
+        if not confirmed:
+            return False
+
+        message_kind, confidence = max(confirmed, key=lambda item: item[1])
+        return self._stop_for_blocking_message(message_kind, confidence)
+
+    def _stop_for_blocking_message(self, message_kind: str, confidence: float) -> bool:
+        cast_attempts = self._unconfirmed_cast_attempts
+        recovery_attempts = self._recovery_attempts_without_success
+        self._enabled.clear()
+        self._reset_detection()
+
+        if message_kind == "inventory_full":
+            detail = (
+                "检测到游戏提示“請整理背包後再試一次。”，背包已经装满。"
+                "监测已停止；请整理背包后再按 F8。"
+            )
+        else:
+            detail = (
+                "检测到游戏提示“必須配戴釣竿。”，鱼竿耐久度可能已经耗尽，"
+                "或当前没有装备鱼竿。监测已停止；请更换或装备鱼竿后再按 F8。"
+            )
+        self._emit(
+            EventKind.ERROR,
+            detail
+            + f"本轮自动抛竿 {cast_attempts} 次，W → S 恢复 {recovery_attempts} 次，"
+            + f"OK 特征相似度 {confidence:.3f}。",
+            monitoring=False,
+        )
+        return True
     def _cancel_pending_recast(self) -> None:
         self._waiting_for_clear = False
         self._fish_resolution_pending = False
@@ -1285,16 +1872,27 @@ class FishingEngine:
         reason = self._pending_recast_reason
         self._pending_recast_at = None
         self._pending_recast_reason = ""
+        self._unconfirmed_cast_attempts += 1
         self._emit(EventKind.SUCCESS, f"{reason}，已按 Space 重新开始钓鱼。", monitoring=True)
+        self._announce_blocking_message_scan_if_needed()
 
-    def _recover_idle_state(self, config: AppConfig) -> None:
-        """原地超时图标出现时，短按 W 再 S 刷新钓鱼状态。"""
+    def _recover_idle_state(
+        self, config: AppConfig, *, startup: bool = False
+    ) -> None:
+        """识别到指南针时短按 W 再 S，刷新开始钓鱼图标。"""
         self._last_recovery_at = time.monotonic()
         self._idle_frames = 0
         self._tap_key("w", config.recovery_key_hold_ms, config)
         time.sleep(config.recovery_pause_ms / 1000)
         self._tap_key("s", config.recovery_key_hold_ms, config)
-        self._emit(EventKind.SUCCESS, "检测到原地失效状态，已执行 W → S 移动恢复。", monitoring=True)
+        self._recovery_attempts_without_success += 1
+        message = (
+            "启动时识别到指南针图标，已执行 W → S 移动恢复。"
+            if startup
+            else "检测到指南针状态，已执行 W → S 移动恢复。"
+        )
+        self._emit(EventKind.SUCCESS, message, monitoring=True)
+        self._announce_blocking_message_scan_if_needed()
 
     def _maintain_background_hover(
         self,
@@ -1363,14 +1961,18 @@ class FishingEngine:
         self._idle_frames = 0
         self._pending_recast_at = None
         self._pending_recast_reason = ""
+        self._startup_probe_active = False
         self._horse_mount_frames = 0
         self._horse_dismount_frames = 0
         self._horse_guard_state = None
         self._horse_settle_until = 0.0
         self._fish_resolution_pending = False
         self._last_logged_icon_state = None
+        self._last_logged_recognition_source = ""
         self._last_stamina_missing_log_at = 0.0
         self._last_background_hover_at = 0.0
+        self._clear_failed_start_tracking()
+        self._last_blocking_message_warning_at = 0.0
         self._clear_escape_watch()
         self._reset_stamina_tracking()
 

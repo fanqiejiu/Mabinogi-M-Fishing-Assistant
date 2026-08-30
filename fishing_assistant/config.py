@@ -23,7 +23,7 @@ DEBUG_IMAGE_PATH = APP_DIR / "fishing_roi_debug.png"
 class AppConfig:
     """以后新增选项时，在此处加入字段即可自动兼容旧配置文件。"""
 
-    schema_version: int = 10
+    schema_version: int = 11
     button_center: tuple[int, int] | None = None
     monitor_index: int = 1
     display_mode: str = "borderless"
@@ -32,6 +32,9 @@ class AppConfig:
     roi_width: int = 160
     roi_height: int = 180
     poll_interval_ms: int = 75
+    # ok：OK FeatureSet 图片特征识别（默认）；pixel：旧版颜色/像素兼容识别。
+    # 两种模式由用户明确选择，OK 模式不会自动回退到像素规则。
+    recognition_backend: str = "ok"
     # 三张参考图的圆形区域中：失效指针约 365、抛竿约 766、上钩鱼体约 1985。
     fish_red_pixel_threshold: int = 1200
     idle_red_pixel_min: int = 180
@@ -99,6 +102,12 @@ def load_config() -> AppConfig:
     if int(raw.get("schema_version", 0)) < 10:
         raw["learned_escape_seconds"] = 0.0
         raw["schema_version"] = 10
+    if int(raw.get("schema_version", 0)) < 11:
+        # 升级后明确使用新的默认方案；不把旧像素规则偷偷混入 OK 模式。
+        raw["recognition_backend"] = "ok"
+        raw["schema_version"] = 11
+    if raw.get("recognition_backend") not in {"ok", "pixel"}:
+        raw["recognition_backend"] = "ok"
     # 不受旧配置影响，更新源始终固定在项目自身仓库并默认启用启动检查。
     raw["github_repository"] = GITHUB_REPOSITORY
     raw["github_auto_check"] = True
