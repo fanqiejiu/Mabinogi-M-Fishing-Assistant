@@ -109,8 +109,6 @@ cd Mabinogi-M-Fishing-Assistant
 .\build.bat
 ```
 
-0.5.7.3 打包结果为 `dist\ok-MabinogiFishing-v0.5.7.3.exe`。EXE 包含 Qt、OpenCV 与 OK 框架依赖，建议作为 Release 附件，不要提交到源码仓库。
-
 ## 许可证
 
 本项目采用 [MIT License](LICENSE)。第三方依赖按各自许可证分发和使用。
