@@ -6,12 +6,13 @@ import threading
 from datetime import datetime
 
 import mss
-from PySide6.QtCore import QSignalBlocker, Qt, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QIcon, QPixmap
+from PySide6.QtCore import QLocale, QSignalBlocker, Qt, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QFont, QIcon, QPixmap, QWheelEvent
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -22,6 +23,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSlider,
     QSpinBox,
     QStackedWidget,
@@ -30,7 +32,13 @@ from PySide6.QtWidgets import (
 )
 
 from . import window_target
-from .config import AppConfig, default_config
+from .config import (
+    AppConfig,
+    default_config,
+    effective_roi_size,
+    parse_resolution,
+    resolution_label_for_size,
+)
 from .constants import (
     APP_AUTHOR,
     APP_DISPLAY_VERSION,
@@ -69,7 +77,7 @@ QFrame#backendOptions:disabled QComboBox, QFrame#backendOptions:disabled QPushBu
     background: #0A1423; border-color: #203047; color: #5E728A;
 }
 QLabel#eyebrow { color: #7F9BBC; font-size: 11px; font-weight: 700; letter-spacing: 1px; }
-QLabel#pageTitle { color: #F8FBFF; font-size: 28px; font-weight: 700; }
+QLabel#pageTitle { color: #F8FBFF; font-size: 25px; font-weight: 700; }
 QLabel#pageSubtitle { color: #91A5BF; font-size: 13px; }
 QLabel#cardTitle { color: #F7FAFC; font-size: 16px; font-weight: 700; }
 QLabel#cardHint, QLabel#helper { color: #8296B0; font-size: 12px; }
@@ -100,15 +108,18 @@ QPushButton:pressed { background: #132033; }
 QPushButton#primaryButton { background: #1CB984; color: #06130F; border: 1px solid #42D4A4; }
 QPushButton#primaryButton:hover { background: #39D3A1; border-color: #7DEAC6; }
 QPushButton#dangerButton { background: #3B2930; border-color: #6B3E4D; color: #FDB5BF; }
-QComboBox, QSpinBox, QLineEdit {
+QComboBox, QSpinBox, QDoubleSpinBox, QLineEdit {
     background: #0B1626; border: 1px solid #2B405B; border-radius: 9px;
     padding: 9px 11px; min-height: 20px; color: #EDF5FE;
 }
-QComboBox:hover, QSpinBox:hover, QLineEdit:hover { border-color: #4B6E94; }
-QComboBox:disabled, QSpinBox:disabled { background: #0A1423; border-color: #203047; color: #5E728A; }
+QComboBox:hover, QSpinBox:hover, QDoubleSpinBox:hover, QLineEdit:hover { border-color: #4B6E94; }
+QComboBox:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled { background: #0A1423; border-color: #203047; color: #5E728A; }
 QComboBox::drop-down { border: 0; width: 24px; }
 QComboBox QAbstractItemView { background: #132136; border: 1px solid #314963; selection-background-color: #1C5448; color: #EEF5FD; }
-QSpinBox::up-button, QSpinBox::down-button { width: 19px; border: 0; }
+QSpinBox::up-button, QSpinBox::down-button,
+QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {
+    width: 19px; border: 0;
+}
 QCheckBox { color: #DCE8F4; font-weight: 600; spacing: 9px; }
 QCheckBox::indicator { width: 18px; height: 18px; border: 1px solid #3B526E; border-radius: 5px; background: #0B1626; }
 QCheckBox::indicator:checked { background: #1CB984; border-color: #42D4A4; }
@@ -154,9 +165,9 @@ QPushButton { background: #F5F8FC; border-color: #C9D8E8; color: #26415F; }
 QPushButton:hover { background: #EAF1F8; border-color: #9CB6D1; }
 QPushButton:pressed { background: #DCE8F3; }
 QPushButton#dangerButton { background: #FFF0F2; border-color: #E6A3AE; color: #9A3442; }
-QComboBox, QSpinBox, QLineEdit { background: #FFFFFF; border-color: #C8D7E6; color: #1C304A; }
-QComboBox:hover, QSpinBox:hover, QLineEdit:hover { border-color: #81A4C9; }
-QComboBox:disabled, QSpinBox:disabled { background: #EEF3F8; border-color: #D9E3ED; color: #8A9AAF; }
+QComboBox, QSpinBox, QDoubleSpinBox, QLineEdit { background: #FFFFFF; border-color: #C8D7E6; color: #1C304A; }
+QComboBox:hover, QSpinBox:hover, QDoubleSpinBox:hover, QLineEdit:hover { border-color: #81A4C9; }
+QComboBox:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled { background: #EEF3F8; border-color: #D9E3ED; color: #8A9AAF; }
 QComboBox QAbstractItemView { background: #FFFFFF; border-color: #C8D7E6; selection-background-color: #DDF5EA; color: #1C304A; }
 QSlider::groove:horizontal { background: #D7E3EF; }
 QSlider::handle:horizontal { background: #158D68; }
@@ -191,8 +202,30 @@ class MetricCard(QFrame):
         layout.addWidget(self.caption_label)
 
 
+class ScrollSafeSpinBox(QSpinBox):
+    """滚轮用于滚动页面，避免鼠标经过数值框时意外改值。"""
+
+    def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802
+        event.ignore()
+
+
+class ScrollSafeDoubleSpinBox(QDoubleSpinBox):
+    """小数输入框同样把滚轮交给外层页面。"""
+
+    def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802
+        event.ignore()
+
+
 class MainWindow(QMainWindow):
     """配置中心、运行状态与操作日志组成的单窗口桌面应用。"""
+
+    PAGE_META = (
+        ("LOCAL AUTOMATION · OVERVIEW", "钓鱼控制台", "校准、启动和运行状态集中在这里。"),
+        ("FISHING · BEHAVIOR", "钓鱼设置", "设置收鱼方式、自动续钓和指南针恢复。"),
+        ("DETECTION · TUNING", "识别阈值", "调整识别引擎、区域和兼容模式阈值。"),
+        ("APPLICATION · SETTINGS", "应用设置", "管理更新检查与本地诊断日志。"),
+        ("GUIDE · HOTKEYS", "使用说明", "查看校准流程和全局快捷键。"),
+    )
 
     engine_event = Signal(object)
     profile_ready = Signal(object)
@@ -212,8 +245,8 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(APP_NAME)
         if APP_ICON_PATH.exists():
             self.setWindowIcon(QIcon(str(APP_ICON_PATH)))
-        self.setMinimumSize(1080, 720)
-        self.resize(1220, 790)
+        self.setMinimumSize(920, 680)
+        self.resize(980, 760)
         self.setStyleSheet(NIGHT_STYLE)
 
         self._build_shell()
@@ -236,13 +269,14 @@ class MainWindow(QMainWindow):
         content = QFrame()
         content.setObjectName("contentSurface")
         content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(32, 27, 32, 28)
-        content_layout.setSpacing(20)
+        content_layout.setContentsMargins(22, 22, 22, 24)
+        content_layout.setSpacing(16)
         content_layout.addLayout(self._build_topbar())
 
         self.stack = QStackedWidget()
         self.stack.addWidget(self._build_dashboard_page())
         self.stack.addWidget(self._build_detection_page())
+        self.stack.addWidget(self._build_threshold_page())
         self.stack.addWidget(self._build_settings_page())
         self.stack.addWidget(self._build_help_page())
         content_layout.addWidget(self.stack, 1)
@@ -252,9 +286,9 @@ class MainWindow(QMainWindow):
     def _build_sidebar(self) -> QFrame:
         sidebar = QFrame()
         sidebar.setObjectName("sidebar")
-        sidebar.setFixedWidth(226)
+        sidebar.setFixedWidth(202)
         layout = QVBoxLayout(sidebar)
-        layout.setContentsMargins(20, 26, 20, 22)
+        layout.setContentsMargins(16, 22, 16, 20)
         layout.setSpacing(7)
 
         brand_row = QHBoxLayout()
@@ -286,9 +320,10 @@ class MainWindow(QMainWindow):
         layout.addSpacing(31)
 
         layout.addWidget(self._nav_button("控制台", 0, True))
-        layout.addWidget(self._nav_button("识别与显示", 1))
-        layout.addWidget(self._nav_button("设置", 2))
-        layout.addWidget(self._nav_button("使用说明", 3))
+        layout.addWidget(self._nav_button("钓鱼设置", 1))
+        layout.addWidget(self._nav_button("识别阈值", 2))
+        layout.addWidget(self._nav_button("设置", 3))
+        layout.addWidget(self._nav_button("使用说明", 4))
         layout.addStretch(1)
 
         footer = QLabel(f"v{APP_VERSION}  ·  {APP_AUTHOR}")
@@ -310,19 +345,25 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentIndex(page)
         for index, button in enumerate(self._navigation):
             button.setChecked(index == page)
+        if 0 <= page < len(self.PAGE_META):
+            eyebrow, title, subtitle = self.PAGE_META[page]
+            self.page_eyebrow.setText(eyebrow)
+            self.page_title.setText(title)
+            self.page_subtitle.setText(subtitle)
 
     def _build_topbar(self) -> QHBoxLayout:
         layout = QHBoxLayout()
         heading = QVBoxLayout()
-        eyebrow = QLabel("LOCAL AUTOMATION · SCREEN DETECTION")
-        eyebrow.setObjectName("eyebrow")
-        title = QLabel("钓鱼控制台")
-        title.setObjectName("pageTitle")
-        subtitle = QLabel("先校准右下角按钮，再启动监测。配置会保存在本机。")
-        subtitle.setObjectName("pageSubtitle")
-        heading.addWidget(eyebrow)
-        heading.addWidget(title)
-        heading.addWidget(subtitle)
+        eyebrow, title, subtitle = self.PAGE_META[0]
+        self.page_eyebrow = QLabel(eyebrow)
+        self.page_eyebrow.setObjectName("eyebrow")
+        self.page_title = QLabel(title)
+        self.page_title.setObjectName("pageTitle")
+        self.page_subtitle = QLabel(subtitle)
+        self.page_subtitle.setObjectName("pageSubtitle")
+        heading.addWidget(self.page_eyebrow)
+        heading.addWidget(self.page_title)
+        heading.addWidget(self.page_subtitle)
         heading.setSpacing(4)
         layout.addLayout(heading)
         layout.addStretch(1)
@@ -338,20 +379,17 @@ class MainWindow(QMainWindow):
     def _build_dashboard_page(self) -> QScrollArea:
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
         canvas = QWidget()
         canvas.setObjectName("pageCanvas")
         layout = QVBoxLayout(canvas)
         layout.setContentsMargins(0, 0, 9, 0)
         layout.setSpacing(16)
 
-        top_grid = QGridLayout()
-        top_grid.setHorizontalSpacing(16)
-        top_grid.setVerticalSpacing(16)
-        top_grid.addWidget(self._build_profile_card(), 0, 0)
-        top_grid.addWidget(self._build_runtime_card(), 0, 1)
-        top_grid.setColumnStretch(0, 3)
-        top_grid.setColumnStretch(1, 2)
-        layout.addLayout(top_grid)
+        layout.addWidget(self._build_profile_card())
+        layout.addWidget(self._build_runtime_card())
         layout.addWidget(self._build_log_card(), 1)
         layout.addWidget(self._build_hardware_card())
         scroll.setWidget(canvas)
@@ -377,7 +415,11 @@ class MainWindow(QMainWindow):
         form.addWidget(self.monitor_combo, 1, 0)
         form.addWidget(self._form_label("画面模式", "用于保存当前游戏配置"), 0, 1)
         form.addWidget(self.mode_combo, 1, 1)
-        form.addWidget(self._form_label("游戏分辨率", "切换后重新校准一次"), 2, 0)
+        form.addWidget(
+            self._form_label("游戏分辨率", "自动检测开启时由游戏窗口选择，也可关闭后手动指定"),
+            2,
+            0,
+        )
         form.addWidget(self.resolution_combo, 3, 0)
         form.addWidget(self._form_label("操作按键", "上钩时发送至前台游戏"), 2, 1)
         key_value = QLabel("Space")
@@ -421,12 +463,17 @@ class MainWindow(QMainWindow):
         )
         backend_layout.addWidget(self.window_backend_combo)
 
-        target.addWidget(self._form_label("捕捉与按键模式", "屏幕模式要求游戏在前台；后台模式只向指定窗口投递按键"), 0, 0)
-        target.addWidget(self._form_label("后台窗口与引擎", "仅在指定窗口后台模式下可用"), 0, 1)
-        target.addWidget(self.target_mode_combo, 1, 0, Qt.AlignmentFlag.AlignTop)
-        target.addWidget(self.backend_options_panel, 1, 1)
+        target.addWidget(
+            self._form_label(
+                "捕捉与按键模式",
+                "屏幕模式要求游戏在前台；后台模式只向指定窗口投递按键",
+            ),
+            0,
+            0,
+        )
+        target.addWidget(self.target_mode_combo, 1, 0)
+        target.addWidget(self.backend_options_panel, 2, 0)
         target.setColumnStretch(0, 1)
-        target.setColumnStretch(1, 2)
         layout.addLayout(target)
         self.target_mode_status = QLabel()
         self.target_mode_status.setObjectName("cardHint")
@@ -562,74 +609,48 @@ class MainWindow(QMainWindow):
     def _build_detection_page(self) -> QScrollArea:
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
         canvas = QWidget()
         canvas.setObjectName("pageCanvas")
         layout = QVBoxLayout(canvas)
         layout.setContentsMargins(0, 0, 9, 0)
         layout.setSpacing(16)
 
-        card = Card()
-        card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(24, 22, 24, 24)
-        card_layout.setSpacing(18)
-        card_layout.addLayout(
+        strategy_card = Card()
+        strategy_layout = QVBoxLayout(strategy_card)
+        strategy_layout.setContentsMargins(22, 20, 22, 22)
+        strategy_layout.setSpacing(16)
+        strategy_layout.addLayout(
             self._card_heading(
-                "识别参数",
-                "图标识别采用用户明确选择的独立方案；默认使用 OK 框架，不会自动混用旧像素规则。",
+                "收鱼策略",
+                "选择上钩后的处理方式；每种模式只显示自己需要的参数。",
             )
         )
 
-        recognition_grid = QGridLayout()
-        recognition_grid.setHorizontalSpacing(18)
-        recognition_grid.setVerticalSpacing(8)
-        self.recognition_backend_combo = QComboBox()
-        self.recognition_backend_combo.addItem(
-            "OK 框架特征识别（推荐）", "ok"
-        )
-        self.recognition_backend_combo.addItem(
-            "旧版像素识别（兼容）", "pixel"
-        )
-        recognition_grid.addWidget(
-            self._form_label(
-                "图标识别模式",
-                "两种模式互不回退；钓鱼、骑马和状态图标默认由 OK FeatureSet 识别。",
-            ),
-            0,
-            0,
-        )
-        recognition_grid.addWidget(self.recognition_backend_combo, 1, 0)
-        recognition_grid.setColumnStretch(0, 1)
-        card_layout.addLayout(recognition_grid)
-        self.recognition_backend_hint = QLabel()
-        self.recognition_backend_hint.setObjectName("cardHint")
-        self.recognition_backend_hint.setWordWrap(True)
-        card_layout.addWidget(self.recognition_backend_hint)
-
-        self.threshold_value = QLabel("1200 px")
-        self.threshold_value.setObjectName("metricValue")
-        self.threshold_slider = QSlider(Qt.Orientation.Horizontal)
-        self.threshold_slider.setRange(400, 3000)
-        threshold_header = QHBoxLayout()
-        self.threshold_header_label = self._form_label(
-            "旧像素模式：鱼体判定阈值",
-            "仅在选择旧版像素识别时生效；OK 模式使用图片特征相似度。",
-        )
-        threshold_header.addWidget(self.threshold_header_label, 1)
-        threshold_header.addWidget(self.threshold_value)
-        card_layout.addLayout(threshold_header)
-        card_layout.addWidget(self.threshold_slider)
-
         catch_grid = QGridLayout()
-        catch_grid.setHorizontalSpacing(18)
+        catch_grid.setHorizontalSpacing(16)
         catch_grid.setVerticalSpacing(10)
         self.catch_strategy_combo = QComboBox()
-        self.catch_strategy_combo.addItem("模式 1：体力条反弹（实验性功能，不稳定）", "stamina_bounce")
-        self.catch_strategy_combo.addItem("模式 2：固定计时收鱼", "fixed_delay")
-        self.catch_strategy_combo.addItem("模式 3：上钩立即收杆", "instant")
-        self.fallback_delay_spin = self._spin_box(5, 60, 14, " 秒")
+        self.catch_strategy_combo.addItem(
+            "模式 1：体力条反弹（实验性功能，不稳定）",
+            "stamina_bounce",
+        )
+        self.catch_strategy_combo.addItem(
+            "模式 2：定时收鱼（支持小数秒）", "fixed_delay"
+        )
+        self.catch_strategy_combo.addItem(
+            "模式 3：上钩立即收杆", "instant"
+        )
+        self.fallback_delay_spin = self._double_spin_box(
+            0.1, 60.0, 14.0, " 秒"
+        )
         self.stamina_zoom_spin = self._spin_box(0, 12, 5, " 格")
 
-        def option_panel(title: str, hint: str, control: QWidget | None = None) -> QFrame:
+        def option_panel(
+            title: str, hint: str, control: QWidget | None = None
+        ) -> QFrame:
             panel = QFrame()
             panel.setObjectName("strategyOption")
             option_layout = QVBoxLayout(panel)
@@ -645,7 +666,7 @@ class MainWindow(QMainWindow):
         self.learned_escape_label.setWordWrap(True)
         mode_one_panel = option_panel(
             "向上滚轮次数",
-            "启动模式 1 时会短暂切到游戏并发送真实向上滚轮放大画面；0 表示不自动滚动。",
+            "启动模式 1 时会向上滚轮放大游戏画面；0 表示不自动滚动。",
             self.stamina_zoom_spin,
         )
         mode_one_panel.layout().addWidget(self.learned_escape_label)
@@ -653,112 +674,255 @@ class MainWindow(QMainWindow):
         self.catch_option_stack = QStackedWidget()
         self.catch_option_stack.addWidget(mode_one_panel)
         self.catch_option_stack.addWidget(
-            option_panel("收杆等待时长", "上钩后等待指定秒数再按 Space，默认 14 秒。", self.fallback_delay_spin)
+            option_panel(
+                "收杆等待时长",
+                "支持 0.1 秒微调，例如 5.3 秒；默认 14.0 秒。",
+                self.fallback_delay_spin,
+            )
         )
         self.catch_option_stack.addWidget(
-            option_panel("模式 3 已就绪", "检测到上钩图标后立即按 Space 收杆，无额外参数。")
+            option_panel(
+                "模式 3 已就绪",
+                "检测到上钩图标后立即按 Space 收杆，无额外参数。",
+            )
         )
         catch_grid.addWidget(
-            self._form_label("收鱼模式", "模式 1 先用 OK 特征确认绿条上方的中鱼图标；第一次下降穿过半条只记录，反弹后第二次穿过半条才收杆。"),
+            self._form_label(
+                "收鱼模式",
+                "模式 1 需要绿色体力条下降后反弹并第二次穿过半条。",
+            ),
             0,
             0,
         )
-        catch_grid.addWidget(self._form_label("当前模式参数", "只显示当前模式需要的设置。"), 0, 1)
         catch_grid.addWidget(self.catch_strategy_combo, 1, 0)
-        catch_grid.addWidget(self.catch_option_stack, 1, 1)
+        catch_grid.addWidget(
+            self._form_label("当前模式参数", "只显示当前模式需要的设置。"),
+            2,
+            0,
+        )
+        catch_grid.addWidget(self.catch_option_stack, 3, 0)
         catch_grid.setColumnStretch(0, 1)
-        catch_grid.setColumnStretch(1, 1)
-        card_layout.addLayout(catch_grid)
+        strategy_layout.addLayout(catch_grid)
         self.catch_strategy_hint = QLabel()
         self.catch_strategy_hint.setObjectName("cardHint")
         self.catch_strategy_hint.setWordWrap(True)
-        card_layout.addWidget(self.catch_strategy_hint)
+        strategy_layout.addWidget(self.catch_strategy_hint)
+        layout.addWidget(strategy_card)
+
+        recovery_card = Card()
+        recovery_layout = QVBoxLayout(recovery_card)
+        recovery_layout.setContentsMargins(22, 20, 22, 22)
+        recovery_layout.setSpacing(14)
+        recovery_layout.addLayout(
+            self._card_heading(
+                "自动恢复与续钓",
+                "指南针出现时执行 W → S；钓鱼图标恢复后自动按 Space。",
+            )
+        )
+        self.auto_resume_check = QCheckBox(
+            "收鱼后自动按 Space 继续钓鱼"
+        )
+        self.auto_recover_check = QCheckBox(
+            "检测到指南针状态时自动执行 W → S"
+        )
+        recovery_layout.addWidget(self.auto_resume_check)
+        recovery_layout.addWidget(self.auto_recover_check)
+
+        recovery_grid = QGridLayout()
+        recovery_grid.setHorizontalSpacing(16)
+        recovery_grid.setVerticalSpacing(10)
+        self.recovery_hold_spin = self._spin_box(80, 600, 180, " ms")
+        self.recovery_cooldown_spin = self._spin_box(
+            1000, 10000, 4500, " ms"
+        )
+        recovery_controls = [
+            (
+                "W / S 按住时间",
+                "每个方向的短按时长",
+                self.recovery_hold_spin,
+            ),
+            (
+                "恢复冷却",
+                "避免持续失效时反复移动",
+                self.recovery_cooldown_spin,
+            ),
+        ]
+        for column, (label, hint, control) in enumerate(recovery_controls):
+            recovery_grid.addWidget(
+                self._form_label(label, hint), 0, column
+            )
+            recovery_grid.addWidget(control, 1, column)
+            recovery_grid.setColumnStretch(column, 1)
+        recovery_layout.addLayout(recovery_grid)
+        layout.addWidget(recovery_card)
+        layout.addStretch(1)
+        scroll.setWidget(canvas)
+        return scroll
+
+    def _build_threshold_page(self) -> QScrollArea:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        canvas = QWidget()
+        canvas.setObjectName("pageCanvas")
+        layout = QVBoxLayout(canvas)
+        layout.setContentsMargins(0, 0, 9, 0)
+        layout.setSpacing(16)
+
+        recognition_card = Card()
+        recognition_layout = QVBoxLayout(recognition_card)
+        recognition_layout.setContentsMargins(22, 20, 22, 22)
+        recognition_layout.setSpacing(15)
+        recognition_layout.addLayout(
+            self._card_heading(
+                "识别引擎",
+                "默认使用 OK 框架；旧像素模式作为用户手动选择的兼容方案。",
+            )
+        )
+        self.recognition_backend_combo = QComboBox()
+        self.recognition_backend_combo.addItem(
+            "OK 框架特征识别（推荐）", "ok"
+        )
+        self.recognition_backend_combo.addItem(
+            "旧版像素识别（兼容）", "pixel"
+        )
+        recognition_layout.addWidget(
+            self._form_label(
+                "图标识别模式",
+                "两种模式互不回退，切换后立即保存。",
+            )
+        )
+        recognition_layout.addWidget(self.recognition_backend_combo)
+        self.recognition_backend_hint = QLabel()
+        self.recognition_backend_hint.setObjectName("cardHint")
+        self.recognition_backend_hint.setWordWrap(True)
+        recognition_layout.addWidget(self.recognition_backend_hint)
+
+        self.threshold_value = QLabel("1200 px")
+        self.threshold_value.setObjectName("metricValue")
+        self.threshold_slider = QSlider(Qt.Orientation.Horizontal)
+        self.threshold_slider.setRange(400, 3000)
+        threshold_header = QHBoxLayout()
+        self.threshold_header_label = self._form_label(
+            "旧像素模式：鱼体判定阈值",
+            "仅在旧像素识别下生效；OK 模式使用图片特征相似度。",
+        )
+        threshold_header.addWidget(self.threshold_header_label, 1)
+        threshold_header.addWidget(self.threshold_value)
+        recognition_layout.addLayout(threshold_header)
+        recognition_layout.addWidget(self.threshold_slider)
+        layout.addWidget(recognition_card)
+
+        region_card = Card()
+        region_layout = QVBoxLayout(region_card)
+        region_layout.setContentsMargins(22, 20, 22, 22)
+        region_layout.setSpacing(14)
+        region_layout.addLayout(
+            self._card_heading(
+                "识别区域与稳定性",
+                "自动匹配窗口分辨率；关闭后可以手动调整识别区域。",
+            )
+        )
+        self.auto_roi_check = QCheckBox(
+            "自动检测游戏窗口分辨率并调整识别区域（推荐）"
+        )
+        self.roi_mode_hint = QLabel()
+        self.roi_mode_hint.setObjectName("cardHint")
+        self.roi_mode_hint.setWordWrap(True)
+        region_layout.addWidget(self.auto_roi_check)
+        region_layout.addWidget(self.roi_mode_hint)
 
         grid = QGridLayout()
-        grid.setHorizontalSpacing(18)
-        grid.setVerticalSpacing(15)
-        self.roi_width_spin = self._spin_box(100, 320, 160, "px")
-        self.roi_height_spin = self._spin_box(100, 360, 180, "px")
+        grid.setHorizontalSpacing(16)
+        grid.setVerticalSpacing(12)
+        self.roi_width_spin = self._spin_box(100, 640, 160, " px")
+        self.roi_height_spin = self._spin_box(100, 720, 180, " px")
         self.interval_combo = QComboBox()
         for value in (50, 75, 100, 125, 150):
             self.interval_combo.addItem(f"{value} ms", value)
         self.trigger_spin = self._spin_box(1, 5, 2, " 帧")
         self.clear_spin = self._spin_box(1, 8, 3, " 帧")
-        self.cooldown_spin = self._spin_box(300, 2000, 800, " ms")
-
+        self.cooldown_spin = self._spin_box(
+            300, 2000, 800, " ms"
+        )
+        self.runtime_retry_spin = self._spin_box(0, 20, 5, " 次")
         controls = [
-            ("识别区域宽度", "应完整覆盖圆形按钮", self.roi_width_spin),
-            ("识别区域高度", "切换分辨率后可微调", self.roi_height_spin),
-            ("轮询间隔", "越短反馈越快，资源占用略高", self.interval_combo),
+            (
+                "识别区域宽度",
+                "应完整覆盖圆形按钮",
+                self.roi_width_spin,
+            ),
+            (
+                "识别区域高度",
+                "切换分辨率后可微调",
+                self.roi_height_spin,
+            ),
+            ("轮询间隔", "越短反馈越快", self.interval_combo),
             ("触发确认", "连续识别到鱼体才按键", self.trigger_spin),
             ("恢复确认", "图标消失后重新待命", self.clear_spin),
-            ("按键冷却", "避免同一条鱼重复按键", self.cooldown_spin),
+            ("按键冷却", "避免重复发送按键", self.cooldown_spin),
+            (
+                "异常重试次数",
+                "0 表示发生异常后立即暂停",
+                self.runtime_retry_spin,
+            ),
         ]
         for index, (label, hint, control) in enumerate(controls):
             row = (index // 2) * 2
             column = index % 2
             grid.addWidget(self._form_label(label, hint), row, column)
             grid.addWidget(control, row + 1, column)
-        card_layout.addLayout(grid)
+            grid.setColumnStretch(column, 1)
+        region_layout.addLayout(grid)
+        layout.addWidget(region_card)
+
+        pixel_card = Card()
+        pixel_layout = QVBoxLayout(pixel_card)
+        pixel_layout.setContentsMargins(22, 20, 22, 22)
+        pixel_layout.setSpacing(12)
+        pixel_layout.addLayout(
+            self._card_heading(
+                "旧像素模式：指南针范围",
+                "仅在旧像素识别下使用；OK 模式会自动禁用这些参数。",
+            )
+        )
+        self.idle_min_spin = self._spin_box(50, 900, 180, " px")
+        self.idle_max_spin = self._spin_box(100, 1100, 620, " px")
+        pixel_grid = QGridLayout()
+        pixel_grid.setHorizontalSpacing(16)
+        pixel_grid.addWidget(
+            self._form_label("失效指针下限", "红色像素下界"),
+            0,
+            0,
+        )
+        pixel_grid.addWidget(
+            self._form_label("失效指针上限", "需低于抛竿图标像素数"),
+            0,
+            1,
+        )
+        pixel_grid.addWidget(self.idle_min_spin, 1, 0)
+        pixel_grid.addWidget(self.idle_max_spin, 1, 1)
+        pixel_grid.setColumnStretch(0, 1)
+        pixel_grid.setColumnStretch(1, 1)
+        pixel_layout.addLayout(pixel_grid)
+        layout.addWidget(pixel_card)
 
         actions = QHBoxLayout()
         actions.addStretch(1)
-        self.restore_button = QPushButton("恢复推荐参数")
+        self.restore_button = QPushButton("恢复全部推荐参数")
         actions.addWidget(self.restore_button)
-        card_layout.addLayout(actions)
-        layout.addWidget(card)
-
-        recovery_card = Card()
-        recovery_layout = QVBoxLayout(recovery_card)
-        recovery_layout.setContentsMargins(24, 22, 24, 24)
-        recovery_layout.setSpacing(15)
-        recovery_layout.addLayout(
-            self._card_heading("自动恢复与续钓", "指南针出现时，执行一次 W → S；开始钓鱼图标出现后自动按 Space。")
-        )
-        self.auto_resume_check = QCheckBox("收鱼后自动按 Space 继续钓鱼")
-        self.auto_recover_check = QCheckBox("检测到指南针状态时自动执行 W → S")
-        recovery_layout.addWidget(self.auto_resume_check)
-        recovery_layout.addWidget(self.auto_recover_check)
-        recovery_grid = QGridLayout()
-        recovery_grid.setHorizontalSpacing(18)
-        recovery_grid.setVerticalSpacing(15)
-        self.idle_min_spin = self._spin_box(50, 900, 180, " px")
-        self.idle_max_spin = self._spin_box(100, 1100, 620, " px")
-        self.recovery_hold_spin = self._spin_box(80, 600, 180, " ms")
-        self.recovery_cooldown_spin = self._spin_box(1000, 10000, 4500, " ms")
-        recovery_controls = [
-            ("失效指针下限", "图二的红色像素下界", self.idle_min_spin),
-            ("失效指针上限", "需低于抛竿图标像素数", self.idle_max_spin),
-            ("W / S 按住时间", "每个方向的短按时长", self.recovery_hold_spin),
-            ("恢复冷却", "避免持续失效时反复移动", self.recovery_cooldown_spin),
-        ]
-        for index, (label, hint, control) in enumerate(recovery_controls):
-            row = (index // 2) * 2
-            column = index % 2
-            recovery_grid.addWidget(self._form_label(label, hint), row, column)
-            recovery_grid.addWidget(control, row + 1, column)
-        recovery_layout.addLayout(recovery_grid)
-        layout.addWidget(recovery_card)
-
-        note = Card()
-        note_layout = QVBoxLayout(note)
-        note_layout.setContentsMargins(22, 18, 22, 18)
-        note_layout.addWidget(QLabel("扩展设计"), 0)
-        note.layout().itemAt(0).widget().setObjectName("cardTitle")
-        detail = QLabel(
-            "识别引擎、固定提示文字模板、配置文件和界面页面相互独立。以后添加多个钓鱼配置、统计报表或窗口自动定位时，可新增模块而无需重写当前检测循环。"
-        )
-        detail.setObjectName("cardHint")
-        detail.setWordWrap(True)
-        note_layout.addWidget(detail)
-        layout.addWidget(note)
+        layout.addLayout(actions)
         layout.addStretch(1)
         scroll.setWidget(canvas)
         return scroll
-
     def _build_help_page(self) -> QScrollArea:
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
         canvas = QWidget()
         canvas.setObjectName("pageCanvas")
         layout = QVBoxLayout(canvas)
@@ -807,6 +971,9 @@ class MainWindow(QMainWindow):
     def _build_settings_page(self) -> QScrollArea:
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
         canvas = QWidget()
         canvas.setObjectName("pageCanvas")
         layout = QVBoxLayout(canvas)
@@ -828,6 +995,7 @@ class MainWindow(QMainWindow):
         )
         ok_credit.setObjectName("cardHint")
         ok_credit.setOpenExternalLinks(True)
+        ok_credit.setWordWrap(True)
         identity_layout.addWidget(ok_credit)
         layout.addWidget(identity)
 
@@ -885,6 +1053,9 @@ class MainWindow(QMainWindow):
         local_hint = QLabel(f"日志目录：{LOG_DIR}")
         local_hint.setObjectName("helper")
         local_hint.setWordWrap(True)
+        local_hint.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
         diagnostic_layout.addWidget(local_hint)
         diagnostic_actions = QHBoxLayout()
         self.create_bundle_button = QPushButton("生成可发送的诊断包")
@@ -933,7 +1104,35 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _spin_box(minimum: int, maximum: int, value: int, suffix: str) -> QSpinBox:
-        spin = QSpinBox()
+        spin = ScrollSafeSpinBox()
+        # 固定使用西文数字，避免部分 Windows 区域设置把数值渲染成异常字形。
+        spin.setLocale(QLocale.c())
+        spin.setGroupSeparatorShown(False)
+        font = QFont("Segoe UI", 10)
+        spin.setFont(font)
+        if spin.lineEdit() is not None:
+            spin.lineEdit().setFont(font)
+        spin.setRange(minimum, maximum)
+        spin.setValue(value)
+        spin.setSuffix(suffix)
+        return spin
+
+    @staticmethod
+    def _double_spin_box(
+        minimum: float,
+        maximum: float,
+        value: float,
+        suffix: str,
+    ) -> QDoubleSpinBox:
+        spin = ScrollSafeDoubleSpinBox()
+        spin.setLocale(QLocale.c())
+        spin.setGroupSeparatorShown(False)
+        spin.setDecimals(1)
+        spin.setSingleStep(0.1)
+        font = QFont("Segoe UI", 10)
+        spin.setFont(font)
+        if spin.lineEdit() is not None:
+            spin.lineEdit().setFont(font)
         spin.setRange(minimum, maximum)
         spin.setValue(value)
         spin.setSuffix(suffix)
@@ -988,6 +1187,7 @@ class MainWindow(QMainWindow):
                 target_window_title=preferred_target.title,
             )
         self._sync_target_mode_controls()
+        self._sync_auto_roi_controls()
 
     def _select_target_window(self, handle: int, title: str) -> None:
         for index in range(self.target_window_combo.count()):
@@ -997,6 +1197,63 @@ class MainWindow(QMainWindow):
             if target.handle == handle or (title and target.title == title):
                 self.target_window_combo.setCurrentIndex(index)
                 return
+
+    def _sync_auto_roi_controls(self) -> None:
+        automatic = self.auto_roi_check.isChecked()
+        target = self.target_window_combo.currentData()
+        has_target = isinstance(target, window_target.WindowInfo)
+        self.resolution_combo.setEnabled(not automatic or not has_target)
+        self.roi_width_spin.setEnabled(not automatic)
+        self.roi_height_spin.setEnabled(not automatic)
+        if not automatic:
+            self.roi_mode_hint.setText(
+                f"当前为手动模式：识别区域 {self.roi_width_spin.value()} × "
+                f"{self.roi_height_spin.value()} px。"
+            )
+            return
+
+        config = self.engine.config()
+        source_resolution: tuple[int, int] | None = None
+        source_text = "所选画面"
+        if isinstance(target, window_target.WindowInfo):
+            source_resolution = (target.width, target.height)
+            profile_label = resolution_label_for_size(target.width, target.height)
+            resolution_blocker = QSignalBlocker(self.resolution_combo)
+            self._select_combo_text(self.resolution_combo, profile_label)
+            del resolution_blocker
+            if config.selected_resolution != profile_label:
+                config = self.engine.update_config(
+                    selected_resolution=profile_label
+                )
+            source_text = (
+                f"已检测游戏窗口 {target.width} × {target.height}，"
+                f"匹配 {profile_label}"
+            )
+        else:
+            selected = self.resolution_combo.currentText()
+            source_resolution = parse_resolution(selected)
+            source_text = f"按所选画面 {selected}"
+
+        roi_width, roi_height = effective_roi_size(config, source_resolution)
+        width_blocker = QSignalBlocker(self.roi_width_spin)
+        height_blocker = QSignalBlocker(self.roi_height_spin)
+        self.roi_width_spin.setValue(roi_width)
+        self.roi_height_spin.setValue(roi_height)
+        del width_blocker, height_blocker
+        self.roi_mode_hint.setText(
+            f"{source_text}，识别区域自动设为 {roi_width} × {roi_height} px。"
+        )
+
+    def _auto_roi_toggled(self, checked: bool) -> None:
+        if checked:
+            self.engine.update_config(auto_scale_roi=True)
+        else:
+            self.engine.update_config(
+                auto_scale_roi=False,
+                roi_width=self.roi_width_spin.value(),
+                roi_height=self.roi_height_spin.value(),
+            )
+        self._sync_auto_roi_controls()
 
     def _sync_target_mode_controls(self) -> None:
         is_window_mode = self.target_mode_combo.currentData() == "window"
@@ -1033,7 +1290,7 @@ class MainWindow(QMainWindow):
             self.target_mode_status.setText(
                 engine_text
                 + "Space / W / S 和虚拟悬停只发送至这个窗口，真实鼠标可自由操作其他程序。"
-                "请保持洛奇 M 窗口未最小化；若后台消息失败，监测会暂停。"
+                "请保持洛奇 M 窗口未最小化；临时错误会按设置重试，达到上限后暂停。"
                 + selection
             )
         else:
@@ -1055,12 +1312,14 @@ class MainWindow(QMainWindow):
             self.target_window_combo,
             self.recognition_backend_combo,
             self.threshold_slider,
+            self.auto_roi_check,
             self.roi_width_spin,
             self.roi_height_spin,
             self.interval_combo,
             self.trigger_spin,
             self.clear_spin,
             self.cooldown_spin,
+            self.runtime_retry_spin,
             self.catch_strategy_combo,
             self.fallback_delay_spin,
             self.stamina_zoom_spin,
@@ -1083,12 +1342,14 @@ class MainWindow(QMainWindow):
         self._select_target_window(config.target_window_handle, config.target_window_title)
         self._select_combo_text(self.resolution_combo, config.selected_resolution)
         self.threshold_slider.setValue(config.fish_red_pixel_threshold)
+        self.auto_roi_check.setChecked(config.auto_scale_roi)
         self.roi_width_spin.setValue(config.roi_width)
         self.roi_height_spin.setValue(config.roi_height)
         self._select_combo_data(self.interval_combo, config.poll_interval_ms)
         self.trigger_spin.setValue(config.trigger_consecutive_frames)
         self.clear_spin.setValue(config.clear_consecutive_frames)
         self.cooldown_spin.setValue(config.press_cooldown_ms)
+        self.runtime_retry_spin.setValue(config.runtime_error_retry_count)
         self._select_combo_data(self.catch_strategy_combo, config.catch_strategy)
         self.fallback_delay_spin.setValue(config.fallback_collect_delay_seconds)
         self.stamina_zoom_spin.setValue(config.stamina_zoom_in_steps)
@@ -1101,6 +1362,7 @@ class MainWindow(QMainWindow):
         self.github_auto_check.setChecked(True)
         del blockers
         self._sync_target_mode_controls()
+        self._sync_auto_roi_controls()
         self._sync_catch_strategy_controls()
         self._sync_recognition_backend_controls()
         self._refresh_threshold_display(config.fish_red_pixel_threshold)
@@ -1120,6 +1382,7 @@ class MainWindow(QMainWindow):
             self._recognition_backend_changed
         )
         self.threshold_slider.valueChanged.connect(self._threshold_changed)
+        self.auto_roi_check.toggled.connect(self._auto_roi_toggled)
         self.roi_width_spin.valueChanged.connect(lambda value: self.engine.update_config(roi_width=value))
         self.roi_height_spin.valueChanged.connect(lambda value: self.engine.update_config(roi_height=value))
         self.interval_combo.currentIndexChanged.connect(
@@ -1134,9 +1397,12 @@ class MainWindow(QMainWindow):
         self.cooldown_spin.valueChanged.connect(
             lambda value: self.engine.update_config(press_cooldown_ms=value)
         )
+        self.runtime_retry_spin.valueChanged.connect(
+            lambda value: self.engine.update_config(runtime_error_retry_count=value)
+        )
         self.catch_strategy_combo.currentIndexChanged.connect(self._catch_strategy_changed)
         self.fallback_delay_spin.valueChanged.connect(
-            lambda value: self.engine.update_config(fallback_collect_delay_seconds=value)
+            self._fallback_delay_changed
         )
         self.stamina_zoom_spin.valueChanged.connect(
             lambda value: self.engine.update_config(stamina_zoom_in_steps=value)
@@ -1169,13 +1435,21 @@ class MainWindow(QMainWindow):
         self.engine.update_config(catch_strategy=str(self.catch_strategy_combo.currentData()))
         self._sync_catch_strategy_controls()
 
+    def _fallback_delay_changed(self, value: float) -> None:
+        self.engine.update_config(
+            fallback_collect_delay_seconds=float(value)
+        )
+        if self.catch_strategy_combo.currentData() == "fixed_delay":
+            self._sync_catch_strategy_controls()
+
     def _sync_catch_strategy_controls(self) -> None:
         strategy = str(self.catch_strategy_combo.currentData())
         stack_index = {"stamina_bounce": 0, "fixed_delay": 1, "instant": 2}.get(strategy, 0)
         self.catch_option_stack.setCurrentIndex(stack_index)
+        delay = float(self.fallback_delay_spin.value())
         hints = {
             "stamina_bounce": "模式 1（实验性功能，不稳定）：先用 OK 特征确认中鱼图标，再跟踪可移动的角色头顶绿条。首次下降穿过半条不会收杆；必须反弹并第二次穿过半条。若识别失败后出现跑鱼提示，会学习本轮耗时并在下一轮提前 1–2 秒兜底。",
-            "fixed_delay": "模式 2：不分析体力条，上钩后按设定秒数收鱼。用于体力条无法稳定识别的场景。",
+            "fixed_delay": f"模式 2：不分析体力条，上钩后等待 {delay:.1f} 秒收鱼。支持 0.1 秒微调，适合体力条无法稳定识别的场景。",
             "instant": "模式 3：只要识别到上钩鱼图标，立即按 Space 收杆。",
         }
         self.catch_strategy_hint.setText(hints.get(strategy, hints["stamina_bounce"]))
@@ -1212,6 +1486,7 @@ class MainWindow(QMainWindow):
             target_window_title=target_title,
         )
         self._sync_target_mode_controls()
+        self._sync_auto_roi_controls()
         self._refresh_calibration_summary()
     def _calibrate(self) -> None:
         self.calibration_summary.setText("校准待命：将鼠标停在钓鱼按钮正中心后按 F7，当前位置会立即记录，鼠标不会移动。")
@@ -1251,7 +1526,7 @@ class MainWindow(QMainWindow):
             )
         else:
             self.recognition_backend_hint.setText(
-                "当前使用 OK 框架：钓鱼、上钩、指南针和骑马图标均由 FeatureSet 图片特征识别；低于阈值时判为未识别，不会退回像素规则。"
+                "当前使用 OK 框架：钓鱼、上钩和骑马图标由 FeatureSet 识别；旋转指南针单独使用中心黑点像素校正。"
             )
             self.red_metric.caption_label.setText("OK 特征相似度")
             self.red_metric.value_label.setText("等待识别")
@@ -1268,6 +1543,7 @@ class MainWindow(QMainWindow):
             recognition_backend=defaults.recognition_backend,
             roi_width=defaults.roi_width,
             roi_height=defaults.roi_height,
+            auto_scale_roi=defaults.auto_scale_roi,
             poll_interval_ms=defaults.poll_interval_ms,
             fish_red_pixel_threshold=defaults.fish_red_pixel_threshold,
             idle_red_pixel_min=defaults.idle_red_pixel_min,
@@ -1275,6 +1551,7 @@ class MainWindow(QMainWindow):
             trigger_consecutive_frames=defaults.trigger_consecutive_frames,
             clear_consecutive_frames=defaults.clear_consecutive_frames,
             press_cooldown_ms=defaults.press_cooldown_ms,
+            runtime_error_retry_count=defaults.runtime_error_retry_count,
             auto_resume_fishing=defaults.auto_resume_fishing,
             auto_recover_idle=defaults.auto_recover_idle,
             recovery_consecutive_frames=defaults.recovery_consecutive_frames,
@@ -1435,10 +1712,18 @@ class MainWindow(QMainWindow):
                 self.red_progress.setValue(min(event.red_pixels, maximum))
             if event.waiting_for_bounce:
                 if event.catch_strategy == "fixed_delay":
-                    total = max(1, self.engine.config().fallback_collect_delay_seconds)
-                    percent = min(100, round(event.hook_elapsed_seconds / total * 100))
+                    total = max(
+                        0.1,
+                        float(
+                            self.engine.config().fallback_collect_delay_seconds
+                        ),
+                    )
+                    percent = min(
+                        100,
+                        round(event.hook_elapsed_seconds / total * 100),
+                    )
                     self.stamina_metric.value_label.setText(
-                        f"{event.hook_elapsed_seconds:.1f} / {total} 秒"
+                        f"{event.hook_elapsed_seconds:.1f} / {total:.1f} 秒"
                     )
                     self.stamina_progress.setValue(percent)
                 elif event.stamina_peak_width:

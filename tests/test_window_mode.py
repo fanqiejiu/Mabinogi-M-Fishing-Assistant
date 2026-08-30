@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import numpy as np
 
 from fishing_assistant import window_target
 from fishing_assistant.config import AppConfig
-from fishing_assistant.engine import EventKind, FishingEngine
+from fishing_assistant.engine import EventKind, FishingEngine, IconState
 from fishing_assistant.window_target import WindowInfo, find_mabinogi_mobile_window
 
 
@@ -83,6 +83,78 @@ class WindowModeTests(unittest.TestCase):
         post_mouse_move.assert_called_once_with(self.target.handle, (1600, 860))
         capture_window_region.assert_called_once_with(
             self.target.handle, (1600, 860), 160, 180
+        )
+
+    @patch("fishing_assistant.engine.window_target.capture_window_region")
+    @patch("fishing_assistant.engine.window_target.post_mouse_move")
+    @patch("fishing_assistant.engine.window_target.resolve_window")
+    def test_window_capture_auto_scales_roi_for_2k_target(
+        self, resolve_window, post_mouse_move, capture_window_region
+    ) -> None:
+        target = WindowInfo(202, "瑪奇 Mobile", 100, 200, 2560, 1440)
+        resolve_window.return_value = target
+        expected = np.zeros((240, 214, 4), dtype=np.uint8)
+        capture_window_region.return_value = expected
+        config = AppConfig(
+            capture_mode="window",
+            window_backend="printwindow",
+            target_window_handle=target.handle,
+            target_window_title=target.title,
+            target_button_offset=(2200, 1200),
+        )
+
+        frame = self.engine._capture_frame(None, config)  # type: ignore[attr-defined]
+
+        self.assertIs(frame, expected)
+        capture_window_region.assert_called_once_with(
+            target.handle, (2200, 1200), 214, 240
+        )
+
+    @patch("fishing_assistant.engine.time.sleep")
+    @patch("fishing_assistant.engine.window_target.resolve_window")
+    def test_ws_recovery_refreshes_virtual_hover_before_space(
+        self, resolve_window, sleep
+    ) -> None:
+        resolve_window.return_value = self.target
+        backend = MagicMock()
+        backend.handle = self.target.handle
+        config = AppConfig(
+            capture_mode="window",
+            window_backend="ok",
+            target_window_handle=self.target.handle,
+            target_window_title=self.target.title,
+            target_button_offset=(1600, 860),
+            recovery_pause_ms=0,
+        )
+        self.engine._config = config  # type: ignore[attr-defined]
+        self.engine._pending_recast_at = 1.0  # type: ignore[attr-defined]
+        self.engine._pending_recast_reason = "启动指南针移动恢复完成"  # type: ignore[attr-defined]
+
+        with patch.object(
+            self.engine, "_get_ok_window_backend", return_value=backend
+        ), patch.object(self.engine, "_tap_key") as tap_key:
+            self.engine._recover_idle_state(config, startup=True)  # type: ignore[attr-defined]
+            self.assertTrue(
+                self.engine._refresh_hover_before_recast  # type: ignore[attr-defined]
+            )
+            self.engine._perform_pending_recast(2.0, IconState.READY_TO_CAST, config)  # type: ignore[attr-defined]
+
+        self.assertEqual(
+            [item.args[0] for item in tap_key.call_args_list],
+            ["w", "s"],
+        )
+        self.assertEqual(
+            backend.mock_calls,
+            [
+                call.keep_hover(self.target, (960, 540)),
+                call.keep_hover(self.target, (1600, 860)),
+                call.keep_hover(self.target, (1600, 860)),
+                call.tap_key("space"),
+            ],
+        )
+        self.assertEqual(sleep.call_count, 3)
+        self.assertFalse(
+            self.engine._refresh_hover_before_recast  # type: ignore[attr-defined]
         )
 
     @patch("fishing_assistant.engine.window_target.capture_window_frame")

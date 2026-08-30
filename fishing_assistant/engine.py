@@ -18,7 +18,13 @@ from ok.feature.FeatureSet import FeatureSet
 
 from . import window_target
 
-from .config import DEBUG_IMAGE_PATH, AppConfig, load_config, save_config
+from .config import (
+    DEBUG_IMAGE_PATH,
+    AppConfig,
+    effective_roi_size,
+    load_config,
+    save_config,
+)
 from .constants import (
     FISH_ESCAPE_TEMPLATE_PATH,
     INVENTORY_FULL_ICON_TEMPLATE_PATH,
@@ -99,6 +105,7 @@ class FishingEngine:
     ESCAPE_MESSAGE_MATCH_THRESHOLD = 0.68
     ESCAPE_MESSAGE_WATCH_SECONDS = 2.8
     CAST_TRANSITION_GRACE_SECONDS = 1.5
+    BACKGROUND_HOVER_REFRESH_DELAY_SECONDS = 0.08
     OK_ICON_MATCH_THRESHOLD = 0.86
     OK_ICON_MATCH_MARGIN = 0.04
     OK_IDLE_ROTATED_MATCH_THRESHOLD = 0.82
@@ -110,6 +117,7 @@ class FishingEngine:
     OK_IDLE_CENTER_MATCH_THRESHOLD = 0.74
     OK_ICON_NORMALIZED_WIDTH = 160
     COMPASS_PIXEL_MATCH_THRESHOLD = 0.50
+    MONITOR_RETRY_MAX_DELAY_SECONDS = 2.0
     STAMINA_ANCHOR_MATCH_THRESHOLD = 0.80
     STAMINA_LOST_GRACE_SECONDS = 0.75
     STARTUP_IDLE_CONFIRM_FRAMES = 2
@@ -144,6 +152,7 @@ class FishingEngine:
         self._idle_frames = 0
         self._pending_recast_at: float | None = None
         self._pending_recast_reason = ""
+        self._refresh_hover_before_recast = False
         self._startup_probe_active = False
         self._last_press_at = 0.0
         self._last_recovery_at = 0.0
@@ -293,7 +302,7 @@ class FishingEngine:
             if config.capture_mode == "window" and config.window_backend == "ok":
                 self._emit(EventKind.INFO, "OK WGC 正在预热首帧，首次启动会在画面到达后自动开始识别。", monitoring=True)
             message = (
-                "OK 指定窗口模式已启动；若截图或定向按键不兼容会自动暂停。"
+                "OK 指定窗口模式已启动；临时错误会按设置重试，达到上限后暂停。"
                 if config.capture_mode == "window"
                 else "监测已启动，请把游戏保持在前台。"
             )
@@ -1121,9 +1130,11 @@ class FishingEngine:
 
     def _monitor_loop(self) -> None:
         screen: mss.MSS | None = None
+        consecutive_failures = 0
         try:
             while not self._shutdown.is_set():
                 if not self._enabled.wait(timeout=0.15):
+                    consecutive_failures = 0
                     continue
 
                 config = self.config()
@@ -1134,6 +1145,11 @@ class FishingEngine:
                 if missing_calibration:
                     self.set_monitoring(False)
                     continue
+                source = (
+                    "目标窗口"
+                    if config.capture_mode == "window"
+                    else "屏幕识别"
+                )
                 try:
                     if config.capture_mode == "screen" and screen is None:
                         screen = mss.MSS()
@@ -1192,10 +1208,49 @@ class FishingEngine:
                         signals.recognition_source,
                         signals.recognition_confidence,
                     )
+                    if consecutive_failures:
+                        self._emit(
+                            EventKind.SUCCESS,
+                            f"{source}已恢复，连续失败计数已清零。",
+                            monitoring=True,
+                        )
+                    consecutive_failures = 0
                 except Exception as error:  # pragma: no cover - 显示器环境差异
-                    self._enabled.clear()
-                    source = "目标窗口" if config.capture_mode == "window" else "屏幕识别"
-                    self._emit(EventKind.ERROR, f"{source}已暂停：{error}")
+                    retry_limit = max(
+                        0, min(20, config.runtime_error_retry_count)
+                    )
+                    if consecutive_failures < retry_limit:
+                        consecutive_failures += 1
+                        if (
+                            config.capture_mode == "window"
+                            and config.window_backend == "ok"
+                        ):
+                            self._close_ok_window_backend()
+                        if screen is not None:
+                            try:
+                                screen.close()
+                            finally:
+                                screen = None
+                        delay = min(
+                            self.MONITOR_RETRY_MAX_DELAY_SECONDS,
+                            0.25 * (2 ** (consecutive_failures - 1)),
+                        )
+                        self._emit(
+                            EventKind.WARNING,
+                            f"{source}临时失败：{error}；{delay:.2f} 秒后自动重试 "
+                            f"({consecutive_failures}/{retry_limit})。",
+                            monitoring=True,
+                        )
+                        time.sleep(delay)
+                    else:
+                        total_failures = consecutive_failures + 1
+                        self._enabled.clear()
+                        self._emit(
+                            EventKind.ERROR,
+                            f"{source}已暂停：连续失败 {total_failures} 次，"
+                            f"已用完 {retry_limit} 次自动重试：{error}",
+                        )
+                        consecutive_failures = 0
                 time.sleep(config.poll_interval_ms / 1000)
         except Exception as error:  # pragma: no cover - mss 初始化失败
             self._emit(EventKind.ERROR, f"无法启动识别服务：{error}")
@@ -1209,18 +1264,21 @@ class FishingEngine:
                 raise RuntimeError("目标窗口尚未完成按钮校准。")
             target = self._resolve_target_window(config)
             self._maintain_background_hover(target, config)
+            roi_width, roi_height = effective_roi_size(
+                config, (target.width, target.height)
+            )
             if config.window_backend == "ok":
                 return self._get_ok_window_backend(target).capture_region(
                     target,
                     config.target_button_offset,
-                    config.roi_width,
-                    config.roi_height,
+                    roi_width,
+                    roi_height,
                 )
             return window_target.capture_window_region(
                 target.handle,
                 config.target_button_offset,
-                config.roi_width,
-                config.roi_height,
+                roi_width,
+                roi_height,
             )
         if screen is None:
             raise RuntimeError("屏幕截图服务未初始化。")
@@ -1645,11 +1703,11 @@ class FishingEngine:
         """输出一条足以复现当前识别环境的启动日志。"""
         strategy = {
             "stamina_bounce": "模式 1（实验性：二次半条确认）",
-            "fixed_delay": f"模式 2（{config.fallback_collect_delay_seconds} 秒定时）",
+            "fixed_delay": f"模式 2（{config.fallback_collect_delay_seconds:.1f} 秒定时）",
             "instant": "模式 3（上钩立即收杆）",
         }[self._catch_strategy(config)]
         icon_recognizer = (
-            "OK FeatureSet 图片特征（不回退像素）"
+            "OK FeatureSet + 指南针中心黑点校正"
             if config.recognition_backend != "pixel"
             else "旧版像素兼容模式"
         )
@@ -1658,11 +1716,21 @@ class FishingEngine:
             if config.recognition_backend == "pixel"
             else ""
         )
+        source_resolution = None
+        if config.capture_mode == "window":
+            try:
+                target = self._resolve_target_window(config)
+                source_resolution = (target.width, target.height)
+            except Exception:
+                pass
+        roi_width, roi_height = effective_roi_size(config, source_resolution)
+        roi_mode = "自动" if config.auto_scale_roi else "手动"
         common = (
             f"策略 {strategy}；图标识别 {icon_recognizer}；"
             "异常提示识别 OK FeatureSet；"
-            f"识别区域 {config.roi_width}×{config.roi_height}；"
-            f"轮询 {config.poll_interval_ms} ms{pixel_detail}。"
+            f"识别区域 {roi_mode} {roi_width}×{roi_height}；"
+            f"轮询 {config.poll_interval_ms} ms；"
+            f"临时错误重试 {config.runtime_error_retry_count} 次{pixel_detail}。"
         )
         if config.capture_mode == "window":
             backend = "OK WGC" if config.window_backend == "ok" else "PrintWindow"
@@ -1718,7 +1786,7 @@ class FishingEngine:
         if strategy == "fixed_delay":
             self._emit(
                 EventKind.INFO,
-                f"检测到上钩，备用模式 2 开始计时 {config.fallback_collect_delay_seconds} 秒。",
+                f"检测到上钩，备用模式 2 开始计时 {config.fallback_collect_delay_seconds:.1f} 秒。",
                 monitoring=True,
             )
             return
@@ -1977,7 +2045,7 @@ class FishingEngine:
                 elapsed = max(0.0, now - (self._hook_started_at or now))
                 return (
                     f"备用模式 2：已等待 {elapsed:.1f} / "
-                    f"{config.fallback_collect_delay_seconds} 秒"
+                    f"{config.fallback_collect_delay_seconds:.1f} 秒"
                 )
             if self._stamina_peak_width:
                 if self._stamina_rebound_started:
@@ -2144,6 +2212,7 @@ class FishingEngine:
         self._reset_stamina_tracking()
         self._pending_recast_at = None
         self._pending_recast_reason = ""
+        self._refresh_hover_before_recast = False
 
     def _schedule_recast(self, now: float, config: AppConfig, reason: str) -> None:
         if not config.auto_resume_fishing:
@@ -2163,6 +2232,9 @@ class FishingEngine:
             return
         if icon_state != IconState.READY_TO_CAST:
             return
+        if self._refresh_hover_before_recast:
+            self._refresh_background_hover(config)
+            self._refresh_hover_before_recast = False
         self._press_key("space", config)
         self._last_press_at = now
         reason = self._pending_recast_reason
@@ -2181,6 +2253,8 @@ class FishingEngine:
         self._tap_key("w", config.recovery_key_hold_ms, config)
         time.sleep(config.recovery_pause_ms / 1000)
         self._tap_key("s", config.recovery_key_hold_ms, config)
+        if config.capture_mode == "window" and config.auto_resume_fishing:
+            self._refresh_hover_before_recast = True
         self._recovery_attempts_without_success += 1
         message = (
             "启动时识别到指南针图标，已执行 W → S 移动恢复。"
@@ -2209,6 +2283,48 @@ class FishingEngine:
         else:
             window_target.post_mouse_move(target.handle, offset)
         self._last_background_hover_at = now
+
+    def _refresh_background_hover(self, config: AppConfig) -> None:
+        """向空白处再回到按钮，触发游戏重新计算首次交互悬停。"""
+        if config.capture_mode != "window":
+            return
+        offset = config.target_button_offset
+        if offset is None:
+            return
+        target = self._resolve_target_window(config)
+        roi_width, roi_height = effective_roi_size(
+            config, (target.width, target.height)
+        )
+        neutral = (target.width // 2, target.height // 2)
+        separation = max(120, roi_width, roi_height)
+        if (
+            abs(neutral[0] - offset[0]) < separation
+            and abs(neutral[1] - offset[1]) < separation
+        ):
+            candidate_x = offset[0] - separation * 2
+            if candidate_x < 0:
+                candidate_x = offset[0] + separation * 2
+            neutral = (
+                min(max(0, candidate_x), max(0, target.width - 1)),
+                min(max(0, offset[1]), max(0, target.height - 1)),
+            )
+
+        if config.window_backend == "ok":
+            backend = self._get_ok_window_backend(target)
+            backend.keep_hover(target, neutral)
+            time.sleep(self.BACKGROUND_HOVER_REFRESH_DELAY_SECONDS)
+            backend.keep_hover(target, offset)
+        else:
+            window_target.post_mouse_move(target.handle, neutral)
+            time.sleep(self.BACKGROUND_HOVER_REFRESH_DELAY_SECONDS)
+            window_target.post_mouse_move(target.handle, offset)
+        time.sleep(self.BACKGROUND_HOVER_REFRESH_DELAY_SECONDS)
+        self._last_background_hover_at = time.monotonic()
+        self._emit(
+            EventKind.INFO,
+            "W → S 后已刷新后台虚拟悬停，准备发送 Space。",
+            monitoring=True,
+        )
 
     def _press_key(self, key: str, config: AppConfig) -> None:
         if config.capture_mode == "window":
@@ -2243,11 +2359,12 @@ class FishingEngine:
         if config.button_center is None:
             raise RuntimeError("未设置钓鱼按钮中心")
         x, y = config.button_center
+        roi_width, roi_height = effective_roi_size(config)
         return {
-            "left": int(x - config.roi_width // 2),
-            "top": int(y - config.roi_height // 2),
-            "width": int(config.roi_width),
-            "height": int(config.roi_height),
+            "left": int(x - roi_width // 2),
+            "top": int(y - roi_height // 2),
+            "width": int(roi_width),
+            "height": int(roi_height),
         }
 
     def _reset_detection(self) -> None:
@@ -2257,6 +2374,7 @@ class FishingEngine:
         self._idle_frames = 0
         self._pending_recast_at = None
         self._pending_recast_reason = ""
+        self._refresh_hover_before_recast = False
         self._startup_probe_active = False
         self._horse_mount_frames = 0
         self._horse_dismount_frames = 0

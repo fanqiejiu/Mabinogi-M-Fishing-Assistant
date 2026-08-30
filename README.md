@@ -4,7 +4,7 @@
   <img src="fishing_assistant/assets/tomato_fish_icon.png" width="112" alt="番茄鱼项目图标">
 </p>
 
-<p align="center">Windows 本地钓鱼辅助工具 · v0.5.6</p>
+<p align="center">Windows 本地钓鱼辅助工具 · v0.5.7.3</p>
 
 <p align="center">
   <a href="https://github.com/fanqiejiu/Mabinogi-M-Fishing-Assistant/releases">📥 下载 Release</a> ·
@@ -109,7 +109,7 @@ cd Mabinogi-M-Fishing-Assistant
 .\build.bat
 ```
 
-0.5.6 打包结果为 `dist\ok-MabinogiFishing-v0.5.6.exe`。EXE 包含 Qt、OpenCV 与 OK 框架依赖，建议作为 Release 附件，不要提交到源码仓库。
+0.5.7.3 打包结果为 `dist\ok-MabinogiFishing-v0.5.7.3.exe`。EXE 包含 Qt、OpenCV 与 OK 框架依赖，建议作为 Release 附件，不要提交到源码仓库。
 
 ## 许可证
 

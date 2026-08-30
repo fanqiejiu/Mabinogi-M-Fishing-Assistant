@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
@@ -18,12 +19,60 @@ APP_DIR = (
 CONFIG_PATH = APP_DIR / "fishing_config.json"
 DEBUG_IMAGE_PATH = APP_DIR / "fishing_roi_debug.png"
 
+_BASE_RESOLUTION = (1920, 1080)
+_BASE_ROI_SIZE = (160, 180)
+_COMMON_RESOLUTIONS = ((1920, 1080), (2560, 1440), (3840, 2160))
+_COMMON_SCALES = (1.0, 4 / 3, 2.0)
+_RESOLUTION_PATTERN = re.compile(r"(\d{3,5})\s*[×xX*]\s*(\d{3,5})")
+
+
+def parse_resolution(value: str) -> tuple[int, int] | None:
+    """从 UI 显示文本中提取宽高；兼容乘号和普通 x。"""
+    match = _RESOLUTION_PATTERN.search(value)
+    if match is None:
+        return None
+    width, height = int(match.group(1)), int(match.group(2))
+    if width <= 0 or height <= 0:
+        return None
+    return width, height
+
+
+def resolution_label_for_size(width: int, height: int) -> str:
+    """将带边框差值的窗口尺寸归到常见 1080p/2K/4K 档位。"""
+    width, height = max(1, int(width)), max(1, int(height))
+    for common_width, common_height in _COMMON_RESOLUTIONS:
+        relative_error = max(
+            abs(width - common_width) / common_width,
+            abs(height - common_height) / common_height,
+        )
+        if relative_error <= 0.06:
+            return f"{common_width} × {common_height}"
+    return f"{width} × {height}"
+
+
+def scaled_roi_size(width: int, height: int) -> tuple[int, int]:
+    """按画面短边比例缩放 ROI，并吸附常见分辨率以容忍窗口边框。"""
+    width, height = max(1, int(width)), max(1, int(height))
+    scale = min(width / _BASE_RESOLUTION[0], height / _BASE_RESOLUTION[1])
+    for common_scale in _COMMON_SCALES:
+        if abs(scale - common_scale) <= 0.07:
+            scale = common_scale
+            break
+
+    def even_size(base: int, minimum: int, maximum: int) -> int:
+        value = int(round((base * scale) / 2) * 2)
+        return max(minimum, min(maximum, value))
+
+    return even_size(_BASE_ROI_SIZE[0], 100, 640), even_size(
+        _BASE_ROI_SIZE[1], 100, 720
+    )
+
 
 @dataclass(slots=True)
 class AppConfig:
     """以后新增选项时，在此处加入字段即可自动兼容旧配置文件。"""
 
-    schema_version: int = 11
+    schema_version: int = 14
     button_center: tuple[int, int] | None = None
     monitor_index: int = 1
     display_mode: str = "borderless"
@@ -31,7 +80,11 @@ class AppConfig:
     ui_theme: str = "night"
     roi_width: int = 160
     roi_height: int = 180
+    # 默认按实际游戏窗口/所选分辨率缩放；关闭后直接使用上面两个手动值。
+    auto_scale_roi: bool = True
     poll_interval_ms: int = 75
+    # 临时截图、窗口或识别循环错误最多自动重试次数；0 表示立即暂停。
+    runtime_error_retry_count: int = 5
     # ok：OK FeatureSet 图片特征识别（默认）；pixel：旧版颜色/像素兼容识别。
     # 两种模式由用户明确选择，OK 模式不会自动回退到像素规则。
     recognition_backend: str = "ok"
@@ -51,7 +104,7 @@ class AppConfig:
     recast_delay_ms: int = 650
     # stamina_bounce：角色头顶绿条反弹时收鱼；fixed_delay：按自定义秒数收鱼；instant：上钩即收。
     catch_strategy: str = "stamina_bounce"
-    fallback_collect_delay_seconds: int = 14
+    fallback_collect_delay_seconds: float = 14.0
     stamina_scan_interval_ms: int = 60
     stamina_zoom_in_steps: int = 5
     # 模式一检测到跑鱼提示后记录本次上钩持续时间，供下一次计时兜底。
@@ -69,6 +122,18 @@ class AppConfig:
 
     def copy(self, **changes: object) -> "AppConfig":
         return replace(self, **changes)
+
+
+def effective_roi_size(
+    config: AppConfig, source_resolution: tuple[int, int] | None = None
+) -> tuple[int, int]:
+    """返回引擎实际使用的 ROI；手动模式不改写用户配置值。"""
+    if not config.auto_scale_roi:
+        return max(1, int(config.roi_width)), max(1, int(config.roi_height))
+    resolution = source_resolution or parse_resolution(config.selected_resolution)
+    if resolution is None:
+        resolution = _BASE_RESOLUTION
+    return scaled_roi_size(*resolution)
 
 
 def default_config() -> AppConfig:
@@ -106,6 +171,26 @@ def load_config() -> AppConfig:
         # 升级后明确使用新的默认方案；不把旧像素规则偷偷混入 OK 模式。
         raw["recognition_backend"] = "ok"
         raw["schema_version"] = 11
+    if int(raw.get("schema_version", 0)) < 12:
+        raw["runtime_error_retry_count"] = 5
+        raw["schema_version"] = 12
+    if int(raw.get("schema_version", 0)) < 13:
+        raw["auto_scale_roi"] = True
+        raw["schema_version"] = 13
+    if int(raw.get("schema_version", 0)) < 14:
+        try:
+            raw["fallback_collect_delay_seconds"] = float(
+                raw.get("fallback_collect_delay_seconds", 14.0)
+            )
+        except (TypeError, ValueError):
+            raw["fallback_collect_delay_seconds"] = 14.0
+        raw["schema_version"] = 14
+    try:
+        raw["fallback_collect_delay_seconds"] = float(
+            raw.get("fallback_collect_delay_seconds", 14.0)
+        )
+    except (TypeError, ValueError):
+        raw["fallback_collect_delay_seconds"] = 14.0
     if raw.get("recognition_backend") not in {"ok", "pixel"}:
         raw["recognition_backend"] = "ok"
     # 不受旧配置影响，更新源始终固定在项目自身仓库并默认启用启动检查。

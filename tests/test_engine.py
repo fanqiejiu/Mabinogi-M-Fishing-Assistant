@@ -7,7 +7,13 @@ from unittest.mock import patch
 import cv2
 import numpy as np
 
-from fishing_assistant.config import AppConfig, load_config
+from fishing_assistant.config import (
+    AppConfig,
+    effective_roi_size,
+    load_config,
+    resolution_label_for_size,
+    scaled_roi_size,
+)
 from fishing_assistant.constants import (
     FISH_ESCAPE_TEMPLATE_PATH,
     INVENTORY_FULL_ICON_TEMPLATE_PATH,
@@ -17,7 +23,13 @@ from fishing_assistant.constants import (
     OK_STAMINA_ANCHOR_TEMPLATE_PATH,
     ROD_REQUIRED_TEMPLATE_PATH,
 )
-from fishing_assistant.engine import FishingEngine, IconState, StaminaBarSample
+from fishing_assistant.engine import (
+    EventKind,
+    FishingEngine,
+    IconColorSignals,
+    IconState,
+    StaminaBarSample,
+)
 from fishing_assistant.window_target import WindowInfo
 
 
@@ -40,8 +52,126 @@ class FishingEngineTests(unittest.TestCase):
             with patch("fishing_assistant.config.CONFIG_PATH", config_path):
                 config = load_config()
 
-        self.assertEqual(config.schema_version, 11)
+        self.assertEqual(config.schema_version, 14)
         self.assertEqual(config.recognition_backend, "ok")
+        self.assertEqual(config.runtime_error_retry_count, 5)
+        self.assertTrue(config.auto_scale_roi)
+        self.assertEqual(config.fallback_collect_delay_seconds, 14.0)
+        self.assertIsInstance(config.fallback_collect_delay_seconds, float)
+
+    def test_integer_fixed_delay_migrates_to_float(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "fishing_config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 13,
+                        "fallback_collect_delay_seconds": 5,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch("fishing_assistant.config.CONFIG_PATH", config_path):
+                config = load_config()
+
+        self.assertEqual(config.schema_version, 14)
+        self.assertEqual(config.fallback_collect_delay_seconds, 5.0)
+        self.assertIsInstance(config.fallback_collect_delay_seconds, float)
+
+    def test_auto_roi_scales_common_resolutions_and_tolerates_window_borders(self) -> None:
+        self.assertEqual(scaled_roi_size(1920, 1080), (160, 180))
+        self.assertEqual(scaled_roi_size(1918, 1030), (160, 180))
+        self.assertEqual(scaled_roi_size(2560, 1440), (214, 240))
+        self.assertEqual(scaled_roi_size(3840, 2160), (320, 360))
+        self.assertEqual(resolution_label_for_size(1918, 1030), "1920 × 1080")
+
+    def test_manual_roi_is_not_scaled(self) -> None:
+        config = AppConfig(
+            auto_scale_roi=False,
+            selected_resolution="3840 × 2160",
+            roi_width=222,
+            roi_height=244,
+        )
+        self.assertEqual(effective_roi_size(config), (222, 244))
+
+    def test_runtime_error_retry_default_is_five(self) -> None:
+        self.assertEqual(AppConfig().runtime_error_retry_count, 5)
+
+    def test_monitor_loop_retries_temporary_window_errors_then_recovers(self) -> None:
+        events = []
+        engine = FishingEngine(events.append)
+        config = AppConfig(
+            capture_mode="window",
+            window_backend="ok",
+            target_button_offset=(1600, 860),
+            runtime_error_retry_count=2,
+            poll_interval_ms=0,
+        )
+        engine._config = config  # type: ignore[attr-defined]
+        engine._enabled.set()  # type: ignore[attr-defined]
+        frame = np.zeros((186, 160, 3), dtype=np.uint8)
+        signals = IconColorSignals(0, 0.0, 0.0, 0.0, 0.0, 0.0)
+
+        def finish_after_success(*_args, **_kwargs) -> None:
+            engine._shutdown.set()  # type: ignore[attr-defined]
+
+        with patch.object(
+            engine,
+            "_capture_frame",
+            side_effect=[RuntimeError("temporary"), RuntimeError("temporary"), frame],
+        ) as capture, patch.object(
+            engine, "_close_ok_window_backend"
+        ) as close_backend, patch.object(
+            FishingEngine,
+            "classify_frame_state",
+            return_value=(IconState.NORMAL, signals),
+        ), patch.object(
+            engine, "_process_frame", side_effect=finish_after_success
+        ), patch(
+            "fishing_assistant.engine.time.sleep"
+        ):
+            engine._monitor_loop()  # type: ignore[attr-defined]
+
+        self.assertEqual(capture.call_count, 3)
+        self.assertEqual(close_backend.call_count, 2)
+        self.assertTrue(engine.is_monitoring())
+        self.assertEqual(
+            sum(event.kind == EventKind.WARNING for event in events), 2
+        )
+        self.assertTrue(any("已恢复" in event.message for event in events))
+
+    def test_monitor_loop_pauses_after_retry_limit_is_exhausted(self) -> None:
+        events = []
+        engine = FishingEngine()
+        config = AppConfig(
+            capture_mode="window",
+            window_backend="ok",
+            target_button_offset=(1600, 860),
+            runtime_error_retry_count=2,
+            poll_interval_ms=0,
+        )
+        engine._config = config  # type: ignore[attr-defined]
+        engine._enabled.set()  # type: ignore[attr-defined]
+
+        def collect(event) -> None:
+            events.append(event)
+            if event.kind == EventKind.ERROR:
+                engine._shutdown.set()  # type: ignore[attr-defined]
+
+        engine.set_event_callback(collect)
+        with patch.object(
+            engine, "_capture_frame", side_effect=RuntimeError("temporary")
+        ) as capture, patch.object(
+            engine, "_close_ok_window_backend"
+        ) as close_backend, patch("fishing_assistant.engine.time.sleep"):
+            engine._monitor_loop()  # type: ignore[attr-defined]
+
+        self.assertEqual(capture.call_count, 3)
+        self.assertEqual(close_backend.call_count, 2)
+        self.assertFalse(engine.is_monitoring())
+        self.assertTrue(
+            any("已用完 2 次自动重试" in event.message for event in events)
+        )
 
     def test_waiting_frame_has_no_red_fish_signal(self) -> None:
         waiting = np.zeros((180, 160, 3), dtype=np.uint8)
@@ -848,6 +978,18 @@ class FishingEngineTests(unittest.TestCase):
             AppConfig(button_center=(1800, 960), roi_width=160, roi_height=180)
         )
         self.assertEqual(region, {"left": 1720, "top": 870, "width": 160, "height": 180})
+
+    def test_screen_capture_region_uses_selected_4k_resolution(self) -> None:
+        region = FishingEngine._capture_region(
+            AppConfig(
+                button_center=(3600, 1920),
+                selected_resolution="3840 × 2160",
+            )
+        )
+        self.assertEqual(
+            region,
+            {"left": 3440, "top": 1740, "width": 320, "height": 360},
+        )
 
 
 if __name__ == "__main__":
