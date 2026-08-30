@@ -57,6 +57,14 @@ class IconState(str, Enum):
     HORSE_DISMOUNT_PROMPT = "horse_dismount_prompt"
 
 
+class StaminaMidpointState(str, Enum):
+    """体力槽半条位置采样块的颜色状态。"""
+
+    UNKNOWN = "unknown"
+    GREEN = "green"
+    DARK = "dark"
+
+
 @dataclass(frozen=True, slots=True)
 class IconColorSignals:
     red_pixels: int
@@ -71,11 +79,16 @@ class IconColorSignals:
 
 @dataclass(frozen=True, slots=True)
 class StaminaBarSample:
-    """动态绿色体力条的一次观测；宽度即当前绿色填充长度。"""
+    """动态体力条的一次观测，并记录半条位置的局部颜色。"""
 
     fill_width: int
     center: tuple[int, int]
     anchor_confidence: float = 1.0
+    fill_left: int | None = None
+    fill_height: int = 0
+    midpoint_state: StaminaMidpointState = StaminaMidpointState.UNKNOWN
+    midpoint_green_ratio: float = 0.0
+    midpoint_dark_ratio: float = 0.0
 
 
 @dataclass(slots=True)
@@ -120,6 +133,10 @@ class FishingEngine:
     MONITOR_RETRY_MAX_DELAY_SECONDS = 2.0
     STAMINA_ANCHOR_MATCH_THRESHOLD = 0.80
     STAMINA_LOST_GRACE_SECONDS = 0.75
+    STAMINA_MIDPOINT_GREEN_RATIO = 0.45
+    STAMINA_MIDPOINT_DARK_RATIO = 0.55
+    STAMINA_MIDPOINT_DARK_CONFIRM_FRAMES = 2
+    STAMINA_MIDPOINT_GREEN_CONFIRM_FRAMES = 2
     STARTUP_IDLE_CONFIRM_FRAMES = 2
     ROD_REQUIRED_MATCH_THRESHOLD = 0.72
     INVENTORY_FULL_MATCH_THRESHOLD = 0.70
@@ -175,6 +192,10 @@ class FishingEngine:
         self._last_stamina_observation_log_at = 0.0
         self._last_stamina_seen_at = 0.0
         self._stamina_last_center: tuple[int, int] | None = None
+        self._stamina_probe_offset_x: int | None = None
+        self._stamina_midpoint_state = StaminaMidpointState.UNKNOWN
+        self._stamina_midpoint_dark_frames = 0
+        self._stamina_midpoint_green_frames = 0
 
         self._escape_watch_until = 0.0
         self._escape_candidate_elapsed = 0.0
@@ -633,6 +654,8 @@ class FishingEngine:
                 width,
                 (x + width // 2, y + height // 2),
                 anchor_confidence,
+                fill_left=x,
+                fill_height=height,
             )
             in_focus_area = (
                 frame_width * 0.20 <= sample.center[0] <= frame_width * 0.80
@@ -662,6 +685,56 @@ class FishingEngine:
             ),
         )
         return sample
+
+    @classmethod
+    def classify_stamina_midpoint(
+        cls,
+        bgr: np.ndarray,
+        sample: StaminaBarSample,
+        probe_offset_x: int,
+    ) -> StaminaBarSample:
+        """读取进度槽半条位置的小块颜色，避免用整段绿条宽度猜反弹。"""
+        if bgr.ndim != 3 or bgr.shape[0] <= 0 or bgr.shape[1] <= 0:
+            return sample
+        left = (
+            sample.fill_left
+            if sample.fill_left is not None
+            else sample.center[0] - sample.fill_width // 2
+        )
+        probe_x = left + max(1, int(probe_offset_x))
+        probe_y = sample.center[1]
+        radius = max(2, min(6, round(max(7, sample.fill_height) * 0.22)))
+        frame_height, frame_width = bgr.shape[:2]
+        left_edge = max(0, probe_x - radius)
+        right_edge = min(frame_width, probe_x + radius + 1)
+        top_edge = max(0, probe_y - radius)
+        bottom_edge = min(frame_height, probe_y + radius + 1)
+        if right_edge <= left_edge or bottom_edge <= top_edge:
+            return sample
+
+        probe = bgr[top_edge:bottom_edge, left_edge:right_edge, :3]
+        hsv = cv2.cvtColor(probe, cv2.COLOR_BGR2HSV)
+        green_mask = cv2.inRange(
+            hsv, np.array([35, 60, 70]), np.array([100, 255, 255])
+        )
+        dark_mask = cv2.inRange(
+            hsv, np.array([0, 0, 0]), np.array([179, 255, 110])
+        )
+        area = max(1, green_mask.size)
+        green_ratio = float(cv2.countNonZero(green_mask)) / area
+        dark_ratio = float(cv2.countNonZero(dark_mask)) / area
+        if green_ratio >= cls.STAMINA_MIDPOINT_GREEN_RATIO:
+            state = StaminaMidpointState.GREEN
+        elif dark_ratio >= cls.STAMINA_MIDPOINT_DARK_RATIO:
+            state = StaminaMidpointState.DARK
+        else:
+            state = StaminaMidpointState.UNKNOWN
+        return replace(
+            sample,
+            midpoint_state=state,
+            midpoint_green_ratio=green_ratio,
+            midpoint_dark_ratio=dark_ratio,
+        )
 
     @staticmethod
     def _white_text_mask(bgr: np.ndarray) -> np.ndarray:
@@ -1356,7 +1429,10 @@ class FishingEngine:
                 )
                 self._last_stamina_missing_log_at = now
             return None
-        return sample
+        probe_offset = self._stamina_probe_offset_x
+        if probe_offset is None:
+            probe_offset = max(1, sample.fill_width // 2)
+        return self.classify_stamina_midpoint(game_frame, sample, probe_offset)
 
     def _capture_escape_message_confidence(
         self, screen: mss.MSS | None, config: AppConfig, now: float
@@ -1604,7 +1680,7 @@ class FishingEngine:
                         self._collect_fish(
                             now,
                             config,
-                            "绿色体力条已下降穿过半条，并在反弹时第二次穿过半条；已按 Space 收鱼。",
+                            "体力条中点已由灰色连续恢复为绿色；已按 Space 收鱼。",
                         )
                 stamina_reference_at = (
                     self._last_stamina_seen_at
@@ -1634,7 +1710,7 @@ class FishingEngine:
                     self._collect_fish(
                         now,
                         config,
-                        f"体力条未完成二次半条确认，已按跑鱼学习时间 {target:.1f} 秒兜底收杆（提前 {margin:.1f} 秒）。",
+                        f"体力条未完成中点灰→绿确认，已按跑鱼学习时间 {target:.1f} 秒兜底收杆（提前 {margin:.1f} 秒）。",
                         allow_without_stamina=True,
                     )
             elif not fish_visible and self._clear_frames >= config.clear_consecutive_frames:
@@ -1702,7 +1778,7 @@ class FishingEngine:
     def _monitoring_details(self, config: AppConfig) -> str:
         """输出一条足以复现当前识别环境的启动日志。"""
         strategy = {
-            "stamina_bounce": "模式 1（实验性：二次半条确认）",
+            "stamina_bounce": "模式 1（实验性：中点灰→绿确认）",
             "fixed_delay": f"模式 2（{config.fallback_collect_delay_seconds:.1f} 秒定时）",
             "instant": "模式 3（上钩立即收杆）",
         }[self._catch_strategy(config)]
@@ -1796,13 +1872,13 @@ class FishingEngine:
                 config.learned_escape_seconds
             )
             learned_hint = (
-                f" 若二次半条识别仍失败，将按已学习的 {target:.1f} 秒"
+                f" 若中点灰→绿识别仍失败，将按已学习的 {target:.1f} 秒"
                 f"兜底收杆（比上次跑鱼提前 {margin:.1f} 秒）。"
             )
         self._emit(
             EventKind.INFO,
-            "检测到上钩，正在追踪绿色体力条；第一次下降穿过半条只记录，"
-            "必须反弹并第二次穿过半条才收鱼。" + learned_hint,
+            "检测到上钩，正在追踪绿色体力条；中点连续变灰后只记录，"
+            "必须再次连续恢复绿色才收鱼。" + learned_hint,
             monitoring=True,
         )
         if stamina_sample is None:
@@ -1907,7 +1983,7 @@ class FishingEngine:
         target, margin = self.learned_collect_timing(learned_seconds)
         message = (
             f"检测到“猶豫了一下，結果讓牠跑掉了”：本轮上钩后 "
-            f"{elapsed:.1f} 秒失败。已记录时间；下一次若绿条仍未完成二次半条确认，"
+            f"{elapsed:.1f} 秒失败。已记录时间；下一次若绿条仍未完成中点灰→绿确认，"
             f"将在 {target:.1f} 秒兜底收杆（提前 {margin:.1f} 秒）。"
         )
         record_error(
@@ -1941,7 +2017,7 @@ class FishingEngine:
             )
         elif stamina_seen:
             self._schedule_recast(
-                now, config, "未出现跑鱼文字，体力条也未完成二次半条确认，已跳过本次目标"
+                now, config, "未出现跑鱼文字，体力条也未完成中点灰→绿确认，已跳过本次目标"
             )
         else:
             self._emit(
@@ -1962,82 +2038,97 @@ class FishingEngine:
             return False
         self._stamina_bar_seen = True
         width = sample.fill_width
+        state = sample.midpoint_state
         self._stamina_sample_count += 1
         observed_at = time.monotonic()
         self._last_stamina_seen_at = observed_at
         self._stamina_last_center = sample.center
+        self._stamina_midpoint_state = state
+
+        if self._stamina_probe_offset_x is None:
+            self._stamina_probe_offset_x = max(1, width // 2)
+        elif not self._stamina_low_seen and width > self._stamina_peak_width:
+            # 上钩首帧可能刚好处于动画缩放；变灰前允许用更宽的绿条修正半条位置。
+            self._stamina_probe_offset_x = max(
+                self._stamina_probe_offset_x, width // 2
+            )
+
+        previous_peak = self._stamina_peak_width
+        if previous_peak == 0:
+            self._stamina_peak_width = width
+            self._stamina_trough_width = width
+        else:
+            self._stamina_peak_width = max(previous_peak, width)
+            self._stamina_trough_width = min(self._stamina_trough_width, width)
+        self._stamina_last_width = width
+
         if observed_at - self._last_stamina_observation_log_at >= 0.9:
             self._emit(
                 EventKind.INFO,
                 f"体力条扫描命中：填充 {width} px，位置 {sample.center}，"
-                f"中鱼锚点 OK {sample.anchor_confidence:.3f}，第 {self._stamina_sample_count} 次采样。",
+                f"中点 {state.value}（绿 {sample.midpoint_green_ratio:.2f} / "
+                f"灰 {sample.midpoint_dark_ratio:.2f}），中鱼锚点 OK "
+                f"{sample.anchor_confidence:.3f}，第 {self._stamina_sample_count} 次采样。",
                 monitoring=True,
             )
             self._last_stamina_observation_log_at = observed_at
-        if self._stamina_peak_width == 0:
-            self._stamina_peak_width = width
-            self._stamina_trough_width = width
-            self._stamina_last_width = width
+
+        if previous_peak == 0:
             self._emit(
                 EventKind.INFO,
-                f"体力条首帧：填充 {width} px，位置 {sample.center}；第一次下降穿过半条时只记录。",
+                f"体力条首帧：锁定半条采样点 {self._stamina_probe_offset_x} px，"
+                "等待该位置连续变灰。",
                 monitoring=True,
             )
+
+        if state == StaminaMidpointState.UNKNOWN:
+            self._stamina_midpoint_dark_frames = 0
+            self._stamina_midpoint_green_frames = 0
+            self._stamina_rebound_started = False
             return False
 
-        previous_peak = self._stamina_peak_width
-        previous_trough = self._stamina_trough_width
-        previous_width = self._stamina_last_width
-        self._stamina_peak_width = max(previous_peak, width)
-        self._stamina_trough_width = min(previous_trough, width)
-        self._stamina_last_width = width
-        half_limit = max(20, round(self._stamina_peak_width * 0.50))
-
         if not self._stamina_low_seen:
-            crossed_half_down = (
-                self._stamina_sample_count >= 2
-                and self._stamina_peak_width >= 40
-                and previous_width > half_limit
-                and width <= half_limit
-            )
-            if crossed_half_down:
+            self._stamina_midpoint_green_frames = 0
+            if state == StaminaMidpointState.DARK:
+                self._stamina_midpoint_dark_frames += 1
+            else:
+                self._stamina_midpoint_dark_frames = 0
+            if (
+                self._stamina_midpoint_dark_frames
+                >= self.STAMINA_MIDPOINT_DARK_CONFIRM_FRAMES
+            ):
                 self._stamina_low_seen = True
                 self._emit(
                     EventKind.INFO,
-                    f"体力条第一次下降穿过半条：{previous_width} → {width} px，"
-                    f"半条阈值 {half_limit} px；本次不收杆，等待反弹后第二次穿过。",
+                    "体力条中点已连续变灰：确认第一次跌破半条；"
+                    "本次不收杆，开始等待中点恢复绿色。",
                     monitoring=True,
                 )
             return False
 
-        rebound_needed = max(8, round(self._stamina_peak_width * 0.08))
-        rise_from_low = width - previous_trough
-        if (
-            not self._stamina_rebound_started
-            and width > previous_width
-            and rise_from_low >= rebound_needed
-        ):
-            self._stamina_rebound_started = True
-            self._emit(
-                EventKind.INFO,
-                f"体力条已确认反弹：最低 {previous_trough} → 当前 {width} px；"
-                f"继续等待回升穿过半条 {half_limit} px。",
-                monitoring=True,
-            )
-
-        crossed_half_up = (
-            self._stamina_rebound_started
-            and width >= half_limit
-            and rise_from_low >= rebound_needed
-        )
-        if crossed_half_up:
-            self._emit(
-                EventKind.INFO,
-                f"体力条第二次穿过半条：最低 {previous_trough} → 当前 {width} px，"
-                f"半条阈值 {half_limit} px；达到收鱼条件。",
-                monitoring=True,
-            )
-        return crossed_half_up
+        if state == StaminaMidpointState.GREEN:
+            self._stamina_midpoint_green_frames += 1
+            if self._stamina_midpoint_green_frames == 1:
+                self._stamina_rebound_started = True
+                self._emit(
+                    EventKind.INFO,
+                    "体力条中点开始恢复绿色，正在确认连续帧。",
+                    monitoring=True,
+                )
+            if (
+                self._stamina_midpoint_green_frames
+                >= self.STAMINA_MIDPOINT_GREEN_CONFIRM_FRAMES
+            ):
+                self._emit(
+                    EventKind.INFO,
+                    "体力条中点已连续恢复绿色：确认活鱼反弹，达到收鱼条件。",
+                    monitoring=True,
+                )
+                return True
+        else:
+            self._stamina_midpoint_green_frames = 0
+            self._stamina_rebound_started = False
+        return False
 
     def _metric_message(self, icon_state: IconState, now: float, config: AppConfig) -> str:
         if self._fish_resolution_pending:
@@ -2049,11 +2140,11 @@ class FishingEngine:
                 )
             if self._stamina_peak_width:
                 if self._stamina_rebound_started:
-                    phase = "已反弹，等待第二次穿过半条"
+                    phase = "中点已回绿，确认连续帧"
                 elif self._stamina_low_seen:
-                    phase = "第一次半条已过，等待反弹"
+                    phase = "中点已变灰，等待反弹回绿"
                 else:
-                    phase = "等待第一次下降穿过半条"
+                    phase = "等待中点连续变灰"
                 return (
                     f"活鱼体力条 {self._stamina_last_width} px / "
                     f"峰值 {self._stamina_peak_width} px · {phase}"
@@ -2087,6 +2178,10 @@ class FishingEngine:
         self._last_stamina_observation_log_at = 0.0
         self._last_stamina_seen_at = 0.0
         self._stamina_last_center = None
+        self._stamina_probe_offset_x = None
+        self._stamina_midpoint_state = StaminaMidpointState.UNKNOWN
+        self._stamina_midpoint_dark_frames = 0
+        self._stamina_midpoint_green_frames = 0
         self._last_stamina_scan_at = 0.0
 
     def _handle_horse_icon(

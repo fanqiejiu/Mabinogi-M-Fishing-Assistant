@@ -644,7 +644,7 @@ class MainWindow(QMainWindow):
             "模式 3：上钩立即收杆", "instant"
         )
         self.fallback_delay_spin = self._double_spin_box(
-            0.1, 60.0, 14.0, " 秒"
+            0.1, 60.0, 5.3, " 秒"
         )
         self.stamina_zoom_spin = self._spin_box(0, 12, 5, " 格")
 
@@ -676,7 +676,7 @@ class MainWindow(QMainWindow):
         self.catch_option_stack.addWidget(
             option_panel(
                 "收杆等待时长",
-                "支持 0.1 秒微调，例如 5.3 秒；默认 14.0 秒。",
+                "支持 0.1 秒微调；默认 5.3 秒。",
                 self.fallback_delay_spin,
             )
         )
@@ -689,7 +689,7 @@ class MainWindow(QMainWindow):
         catch_grid.addWidget(
             self._form_label(
                 "收鱼模式",
-                "模式 1 需要绿色体力条下降后反弹并第二次穿过半条。",
+                "模式 1 会定位体力槽中点，连续确认灰色后等待它恢复绿色。",
             ),
             0,
             0,
@@ -1448,7 +1448,7 @@ class MainWindow(QMainWindow):
         self.catch_option_stack.setCurrentIndex(stack_index)
         delay = float(self.fallback_delay_spin.value())
         hints = {
-            "stamina_bounce": "模式 1（实验性功能，不稳定）：先用 OK 特征确认中鱼图标，再跟踪可移动的角色头顶绿条。首次下降穿过半条不会收杆；必须反弹并第二次穿过半条。若识别失败后出现跑鱼提示，会学习本轮耗时并在下一轮提前 1–2 秒兜底。",
+            "stamina_bounce": "模式 1（实验性功能，不稳定）：先用 OK 特征确认中鱼图标并定位体力槽，再观察半条位置的小块颜色。连续变灰后不会收杆；只有再次连续恢复绿色才确认反弹。若识别失败后出现跑鱼提示，会学习本轮耗时并在下一轮提前 1–2 秒兜底。",
             "fixed_delay": f"模式 2：不分析体力条，上钩后等待 {delay:.1f} 秒收鱼。支持 0.1 秒微调，适合体力条无法稳定识别的场景。",
             "instant": "模式 3：只要识别到上钩鱼图标，立即按 Space 收杆。",
         }

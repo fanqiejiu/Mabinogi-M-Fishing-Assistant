@@ -102,9 +102,9 @@ class AppConfig:
     recovery_pause_ms: int = 120
     recovery_cooldown_ms: int = 4500
     recast_delay_ms: int = 650
-    # stamina_bounce：角色头顶绿条反弹时收鱼；fixed_delay：按自定义秒数收鱼；instant：上钩即收。
+    # stamina_bounce：体力槽中点灰→绿时收鱼；fixed_delay：按自定义秒数收鱼；instant：上钩即收。
     catch_strategy: str = "stamina_bounce"
-    fallback_collect_delay_seconds: float = 14.0
+    fallback_collect_delay_seconds: float = 5.3
     stamina_scan_interval_ms: int = 60
     stamina_zoom_in_steps: int = 5
     # 模式一检测到跑鱼提示后记录本次上钩持续时间，供下一次计时兜底。
@@ -180,17 +180,17 @@ def load_config() -> AppConfig:
     if int(raw.get("schema_version", 0)) < 14:
         try:
             raw["fallback_collect_delay_seconds"] = float(
-                raw.get("fallback_collect_delay_seconds", 14.0)
+                raw.get("fallback_collect_delay_seconds", 5.3)
             )
         except (TypeError, ValueError):
-            raw["fallback_collect_delay_seconds"] = 14.0
+            raw["fallback_collect_delay_seconds"] = 5.3
         raw["schema_version"] = 14
     try:
         raw["fallback_collect_delay_seconds"] = float(
-            raw.get("fallback_collect_delay_seconds", 14.0)
+            raw.get("fallback_collect_delay_seconds", 5.3)
         )
     except (TypeError, ValueError):
-        raw["fallback_collect_delay_seconds"] = 14.0
+        raw["fallback_collect_delay_seconds"] = 5.3
     if raw.get("recognition_backend") not in {"ok", "pixel"}:
         raw["recognition_backend"] = "ok"
     # 不受旧配置影响，更新源始终固定在项目自身仓库并默认启用启动检查。

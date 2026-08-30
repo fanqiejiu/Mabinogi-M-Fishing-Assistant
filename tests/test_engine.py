@@ -29,6 +29,7 @@ from fishing_assistant.engine import (
     IconColorSignals,
     IconState,
     StaminaBarSample,
+    StaminaMidpointState,
 )
 from fishing_assistant.window_target import WindowInfo
 
@@ -56,7 +57,7 @@ class FishingEngineTests(unittest.TestCase):
         self.assertEqual(config.recognition_backend, "ok")
         self.assertEqual(config.runtime_error_retry_count, 5)
         self.assertTrue(config.auto_scale_roi)
-        self.assertEqual(config.fallback_collect_delay_seconds, 14.0)
+        self.assertEqual(config.fallback_collect_delay_seconds, 5.3)
         self.assertIsInstance(config.fallback_collect_delay_seconds, float)
 
     def test_integer_fixed_delay_migrates_to_float(self) -> None:
@@ -514,77 +515,97 @@ class FishingEngineTests(unittest.TestCase):
         self.assertFalse(engine._fish_resolution_pending)  # type: ignore[attr-defined]
         self.assertIsNone(engine._pending_recast_at)  # type: ignore[attr-defined]
 
-    def test_stamina_bar_must_drop_then_rebound_before_collecting(self) -> None:
+    def test_stamina_midpoint_must_turn_dark_then_green_before_collecting(self) -> None:
         config = AppConfig(
             catch_strategy="stamina_bounce",
             trigger_consecutive_frames=1,
             press_cooldown_ms=0,
         )
         engine = FishingEngine()
-        peak = StaminaBarSample(132, (400, 300))
-        trough = StaminaBarSample(48, (400, 300))
-        rebound = StaminaBarSample(72, (400, 300))
+        green = StaminaBarSample(
+            132, (400, 300), midpoint_state=StaminaMidpointState.GREEN
+        )
+        dark = StaminaBarSample(
+            64, (400, 300), midpoint_state=StaminaMidpointState.DARK
+        )
+        rebound = StaminaBarSample(
+            72, (400, 300), midpoint_state=StaminaMidpointState.GREEN
+        )
         with patch("fishing_assistant.engine.pyautogui.press") as press:
-            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=peak)
-            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=trough)
+            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=green)
+            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=dark)
+            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=dark)
+            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=rebound)
             press.assert_not_called()
             engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=rebound)
         press.assert_called_once_with("space")
 
-    def test_tracking_that_starts_below_half_does_not_guess_first_crossing(self) -> None:
+    def test_midpoint_tracking_can_start_after_bar_is_already_dark(self) -> None:
         config = AppConfig(
             catch_strategy="stamina_bounce",
             trigger_consecutive_frames=1,
             press_cooldown_ms=0,
         )
         engine = FishingEngine()
-        with patch("fishing_assistant.engine.pyautogui.press") as press:
-            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=StaminaBarSample(55, (80, 80)))
-            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=StaminaBarSample(45, (500, 320)))
-            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=StaminaBarSample(132, (500, 320)))
-        press.assert_not_called()
-    def test_stamina_bar_without_rebound_is_not_collected(self) -> None:
-        config = AppConfig(
-            catch_strategy="stamina_bounce",
-            trigger_consecutive_frames=1,
-            press_cooldown_ms=0,
+        dark = StaminaBarSample(
+            55, (500, 320), midpoint_state=StaminaMidpointState.DARK
         )
-        engine = FishingEngine()
-        with patch("fishing_assistant.engine.pyautogui.press") as press:
-            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=StaminaBarSample(132, (400, 300)))
-            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=StaminaBarSample(48, (400, 300)))
-            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=StaminaBarSample(56, (400, 300)))
-        press.assert_not_called()
-
-    def test_stamina_rebound_works_when_first_peak_is_seen_late(self) -> None:
-        config = AppConfig(
-            catch_strategy="stamina_bounce",
-            trigger_consecutive_frames=1,
-            press_cooldown_ms=0,
+        green = StaminaBarSample(
+            90, (505, 322), midpoint_state=StaminaMidpointState.GREEN
         )
-        engine = FishingEngine()
         with patch("fishing_assistant.engine.pyautogui.press") as press:
-            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=StaminaBarSample(80, (400, 300)))
-            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=StaminaBarSample(38, (560, 480)))
-            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=StaminaBarSample(57, (120, 720)))
-        press.assert_called_once_with("space")
-
-    def test_first_half_crossing_and_small_jitter_do_not_collect(self) -> None:
-        config = AppConfig(
-            catch_strategy="stamina_bounce",
-            trigger_consecutive_frames=1,
-            press_cooldown_ms=0,
-        )
-        engine = FishingEngine()
-        with patch("fishing_assistant.engine.pyautogui.press") as press:
-            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=StaminaBarSample(132, (400, 300)))
-            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=StaminaBarSample(64, (400, 300)))
-            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=StaminaBarSample(65, (400, 300)))
+            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=dark)
+            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=dark)
+            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=green)
             press.assert_not_called()
-            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=StaminaBarSample(46, (400, 300)))
-            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=StaminaBarSample(72, (400, 300)))
+            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=green)
         press.assert_called_once_with("space")
 
+    def test_stamina_midpoint_without_green_return_is_not_collected(self) -> None:
+        config = AppConfig(
+            catch_strategy="stamina_bounce",
+            trigger_consecutive_frames=1,
+            press_cooldown_ms=0,
+        )
+        engine = FishingEngine()
+        green = StaminaBarSample(
+            132, (400, 300), midpoint_state=StaminaMidpointState.GREEN
+        )
+        dark = StaminaBarSample(
+            48, (400, 300), midpoint_state=StaminaMidpointState.DARK
+        )
+        with patch("fishing_assistant.engine.pyautogui.press") as press:
+            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=green)
+            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=dark)
+            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=dark)
+            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=dark)
+        press.assert_not_called()
+
+    def test_single_frame_color_jitter_does_not_collect(self) -> None:
+        config = AppConfig(
+            catch_strategy="stamina_bounce",
+            trigger_consecutive_frames=1,
+            press_cooldown_ms=0,
+        )
+        engine = FishingEngine()
+        green = StaminaBarSample(
+            132, (400, 300), midpoint_state=StaminaMidpointState.GREEN
+        )
+        dark = StaminaBarSample(
+            64, (400, 300), midpoint_state=StaminaMidpointState.DARK
+        )
+        with patch("fishing_assistant.engine.pyautogui.press") as press:
+            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=green)
+            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=dark)
+            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=green)
+            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=dark)
+            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=dark)
+            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=green)
+            press.assert_not_called()
+            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=dark)
+            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=green)
+            engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=green)
+        press.assert_called_once_with("space")
     def test_rod_required_template_matches_scaled_top_notice(self) -> None:
         template = cv2.imread(str(ROD_REQUIRED_TEMPLATE_PATH), cv2.IMREAD_COLOR)
         self.assertIsNotNone(template)
@@ -813,6 +834,44 @@ class FishingEngineTests(unittest.TestCase):
         self.assertEqual(sample.fill_width, 132)  # type: ignore[union-attr]
         self.assertEqual(sample.center, (127, 88))  # type: ignore[union-attr]
 
+    def test_stamina_midpoint_classifier_reads_locked_half_position(self) -> None:
+        dark_color = np.array([40, 40, 40], dtype=np.uint8)
+        green_color = cv2.cvtColor(
+            np.array([[[62, 210, 230]]], dtype=np.uint8), cv2.COLOR_HSV2BGR
+        )[0, 0]
+        high_frame = np.full((120, 240, 3), 155, dtype=np.uint8)
+        high_frame[50:70, 20:200] = dark_color
+        high_frame[54:66, 25:130] = green_color
+        high_sample = StaminaBarSample(
+            105, (77, 60), fill_left=25, fill_height=12
+        )
+
+        high_result = FishingEngine.classify_stamina_midpoint(
+            high_frame, high_sample, 80
+        )
+
+        self.assertEqual(high_result.midpoint_state, StaminaMidpointState.GREEN)
+        self.assertGreaterEqual(
+            high_result.midpoint_green_ratio,
+            FishingEngine.STAMINA_MIDPOINT_GREEN_RATIO,
+        )
+
+        low_frame = np.full((120, 240, 3), 155, dtype=np.uint8)
+        low_frame[50:70, 20:200] = dark_color
+        low_frame[54:66, 25:90] = green_color
+        low_sample = StaminaBarSample(
+            65, (57, 60), fill_left=25, fill_height=12
+        )
+
+        low_result = FishingEngine.classify_stamina_midpoint(
+            low_frame, low_sample, 80
+        )
+
+        self.assertEqual(low_result.midpoint_state, StaminaMidpointState.DARK)
+        self.assertGreaterEqual(
+            low_result.midpoint_dark_ratio,
+            FishingEngine.STAMINA_MIDPOINT_DARK_RATIO,
+        )
     def test_production_stamina_detector_requires_ok_fish_anchor(self) -> None:
         frame = np.full((360, 640, 3), 155, dtype=np.uint8)
         green = cv2.cvtColor(
@@ -836,7 +895,7 @@ class FishingEngineTests(unittest.TestCase):
         frame[top : top + anchor.shape[0], left : left + anchor.shape[1]] = 155
         self.assertIsNone(FishingEngine.find_stamina_bar(frame, require_anchor=True))
 
-    def test_stamina_rebound_continues_when_hook_icon_temporarily_misses(self) -> None:
+    def test_midpoint_sequence_continues_when_hook_icon_temporarily_misses(self) -> None:
         config = AppConfig(
             catch_strategy="stamina_bounce",
             trigger_consecutive_frames=1,
@@ -844,19 +903,22 @@ class FishingEngineTests(unittest.TestCase):
             press_cooldown_ms=0,
         )
         engine = FishingEngine()
+        green = StaminaBarSample(
+            132, (400, 300), midpoint_state=StaminaMidpointState.GREEN
+        )
+        dark = StaminaBarSample(
+            64, (398, 301), midpoint_state=StaminaMidpointState.DARK
+        )
+        rebound = StaminaBarSample(
+            82, (404, 302), midpoint_state=StaminaMidpointState.GREEN
+        )
         with patch("fishing_assistant.engine.pyautogui.press") as press:
-            engine._process_frame(
-                1985, config, IconState.FISH_HOOKED, StaminaBarSample(132, (400, 300))
-            )
-            engine._process_frame(
-                0, config, IconState.NORMAL, StaminaBarSample(64, (398, 301))
-            )
-            engine._process_frame(
-                0, config, IconState.NORMAL, StaminaBarSample(46, (402, 299))
-            )
-            engine._process_frame(
-                0, config, IconState.NORMAL, StaminaBarSample(72, (404, 302))
-            )
+            engine._process_frame(1985, config, IconState.FISH_HOOKED, green)
+            engine._process_frame(0, config, IconState.NORMAL, dark)
+            engine._process_frame(0, config, IconState.NORMAL, dark)
+            engine._process_frame(0, config, IconState.NORMAL, rebound)
+            press.assert_not_called()
+            engine._process_frame(0, config, IconState.NORMAL, rebound)
 
         press.assert_called_once_with("space")
     def test_stamina_detector_prioritizes_character_zone_over_top_left_hud(self) -> None:

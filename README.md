@@ -4,7 +4,7 @@
   <img src="fishing_assistant/assets/tomato_fish_icon.png" width="112" alt="番茄鱼项目图标">
 </p>
 
-<p align="center">Windows 本地钓鱼辅助工具 · v0.5.7.3</p>
+<p align="center">Windows 本地钓鱼辅助工具 · v0.5.7.4</p>
 
 <p align="center">
   <a href="https://github.com/fanqiejiu/Mabinogi-M-Fishing-Assistant/releases">📥 下载 Release</a> ·
@@ -23,7 +23,7 @@
 ## 功能
 
 - **两种图标识别方案**：默认使用 OK FeatureSet 图片特征；旧版像素模式只在用户手动选择时启用。
-- **三种收鱼方式**：模式 1 用 OK 中鱼图标定位动态绿条并识别反弹，模式 2 固定计时，模式 3 上钩立即收杆。
+- **三种收鱼方式**：模式 1 用 OK 中鱼图标定位动态绿条，并以槽中点灰→绿识别反弹，模式 2 固定计时，模式 3 上钩立即收杆。
 - **耗材与背包保护**：连续尝试失败后，用 OK 特征确认鱼竿提示、背包满文字和红色背包图标，确认后停止监测。
 - **跑鱼时间学习**：模式 1 检测到“讓牠跑掉了”后记录本轮耗时；下一轮识别仍失败时提前 1–2 秒兜底收杆。
 - **自动收鱼与续钓**：上钩后收鱼，图标恢复后再抛竿。
