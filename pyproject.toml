@@ -26,3 +26,6 @@ py-modules = ["mabinogi_fishing_helper"]
 
 [tool.setuptools.packages.find]
 include = ["fishing_assistant*"]
+
+[tool.setuptools.package-data]
+fishing_assistant = ["assets/*"]

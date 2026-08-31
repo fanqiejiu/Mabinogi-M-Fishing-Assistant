@@ -2,7 +2,7 @@
 setlocal
 cd /d "%~dp0"
 
-if not exist ".venv\Scripts\python.exe" (
+if not exist ".venv\install-complete.marker" (
   call setup.bat || exit /b 1
 )
 
