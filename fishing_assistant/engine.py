@@ -133,9 +133,12 @@ class FishingEngine:
     # 连续未判定时每 N 帧回退一次全范围扫描，兼容用户中途改窗口大小。
     OK_SCALE_LOCK_NEIGHBORS = 3
     OK_SCALE_RESCAN_EVERY = 8
-    # 受限扫描下最高分接近判定门槛却失败时（相似图标吃了尺度限制的亏），
-    # 当帧立刻回退全范围重扫主模板，避免锁尺度造成漏判。
-    OK_SCALE_RETRY_MIN_CONFIDENCE = 0.80
+    # 图标 hint 只收「判定级」命中：过渡帧 0.70-0.85 的垃圾命中若能写入
+    # hint，会把该模板限缩在错误尺度、分数落入重试死区后永远救不回来。
+    OK_ICON_HINT_MIN_CONFIDENCE = OK_ICON_MATCH_THRESHOLD
+    # 受限扫描下最高分达到 hint 可记录水位却判定失败时，当帧立刻回退
+    # 全范围重扫主模板；此闸必须 ≤ 所有 hint 记录门槛，才不存在死区。
+    OK_SCALE_RETRY_MIN_CONFIDENCE = 0.70
     # 上钩期间反弹窗口按 ~60ms 采样节奏设计，主循环睡眠必须跟着缩短。
     PENDING_RESOLUTION_POLL_SECONDS = 0.015
     OK_IDLE_ROTATED_MATCH_THRESHOLD = 0.82
@@ -172,6 +175,7 @@ class FishingEngine:
     _stamina_anchor_template: np.ndarray | None = None
     _scale_hints: dict[str, float] = {}
     _no_decision_streak = 0
+    _last_decided_state: IconState | None = None
 
     def __init__(self, event_callback: EventCallback | None = None) -> None:
         self._config = load_config()
@@ -186,6 +190,7 @@ class FishingEngine:
         self._red_frames = 0
         self._clear_frames = 0
         self._idle_frames = 0
+        self._interrupt_generation = 0
         self._pending_recast_at: float | None = None
         self._pending_recast_reason = ""
         self._refresh_hover_before_recast = False
@@ -332,11 +337,12 @@ class FishingEngine:
             if config.capture_mode == "window":
                 try:
                     target = self._resolve_target_window(config)
+                    # hover 阶段窗口也可能刚好消失，必须同在保护范围内。
+                    self._maintain_background_hover(target, config, force=True)
                 except RuntimeError as error:
                     self._startup_probe_active = False
                     self._emit(EventKind.WARNING, f"无法启动后台模式：{error}")
                     return False
-                self._maintain_background_hover(target, config, force=True)
                 self._emit(
                     EventKind.INFO,
                     f"后台虚拟悬停已锁定至窗口内 {config.target_button_offset}；真实鼠标可自由移动。",
@@ -354,6 +360,8 @@ class FishingEngine:
             )
             self._emit(EventKind.STATE, message, monitoring=True)
         else:
+            # 递增中断代数：让「停止→立刻重启」也能取消进行中的按键序列。
+            self._interrupt_generation += 1
             self._enabled.clear()
             self._emit(EventKind.STATE, "监测已暂停，不会发送按键。", monitoring=False)
         return True
@@ -870,6 +878,7 @@ class FishingEngine:
         category_name: str,
         use_gray_scale: bool = True,
         early_exit_confidence: float | None = None,
+        hint_floor: float | None = None,
     ) -> float:
         """通过 OK FeatureSet 在指定区域执行多尺度灰度模板识别。"""
         if (
@@ -940,7 +949,10 @@ class FishingEngine:
                     and best >= early_exit_confidence
                 ):
                     break
-        if best_scale is not None and best >= cls.OK_SCALE_HINT_MIN_CONFIDENCE:
+        record_floor = (
+            hint_floor if hint_floor is not None else cls.OK_SCALE_HINT_MIN_CONFIDENCE
+        )
+        if best_scale is not None and best >= record_floor:
             cls._scale_hints[category_name] = best_scale
         return best
 
@@ -1185,6 +1197,7 @@ class FishingEngine:
                     normalized_width=cls.OK_ICON_NORMALIZED_WIDTH,
                     baseline_scale=1.0,
                     category_name=f"icon_{state_name}",
+                    hint_floor=cls.OK_ICON_HINT_MIN_CONFIDENCE,
                 )
                 scores.append((IconState(state_name), confidence))
             except (ValueError, cv2.error):
@@ -1214,9 +1227,26 @@ class FishingEngine:
         if not scores:
             return None, 0.0, 0.0
         decided, best_confidence, second_confidence = cls._decide_icon(scores)
+        restricted_active = bool(cls._scale_hints)
+        full_rescanned = False
+        if (
+            decided is not None
+            and restricted_active
+            and decided != cls._last_decided_state
+        ):
+            # 限缩扫描下的「转态判定」必须全幅复验：限缩可能压低真状态、
+            # 放行错状态，而按错键正是转态时才会发生。以全幅结果为准。
+            scores = cls._score_icon_templates(
+                bgr, scales_override=cls.OK_ICON_FULL_SCALES
+            )
+            decided, best_confidence, second_confidence = cls._decide_icon(
+                scores
+            )
+            full_rescanned = True
         if (
             decided is None
-            and cls._scale_hints
+            and restricted_active
+            and not full_rescanned
             and best_confidence >= cls.OK_SCALE_RETRY_MIN_CONFIDENCE
         ):
             # 近判定却失败：可能吃了尺度限缩的亏，当帧全范围重扫一次。
@@ -1227,6 +1257,7 @@ class FishingEngine:
                 scores
             )
         if decided is not None:
+            cls._last_decided_state = decided
             cls._note_icon_decision()
             return decided, best_confidence, second_confidence
 
@@ -1271,6 +1302,7 @@ class FishingEngine:
                     normalized_width=cls.OK_ICON_NORMALIZED_WIDTH,
                     baseline_scale=1.0,
                     category_name=f"icon_idle_rotated_{index}",
+                    hint_floor=cls.OK_IDLE_ROTATED_MATCH_THRESHOLD,
                 )
             except (ValueError, cv2.error):
                 continue
@@ -1281,6 +1313,7 @@ class FishingEngine:
             and idle_confidence - non_idle_confidence
             >= cls.OK_IDLE_ROTATED_MATCH_MARGIN
         ):
+            cls._last_decided_state = IconState.IDLE_RECOVERY
             cls._note_icon_decision()
             return (
                 IconState.IDLE_RECOVERY,
@@ -1311,6 +1344,7 @@ class FishingEngine:
             except (ValueError, cv2.error):
                 center_confidence = 0.0
             if center_confidence >= cls.OK_IDLE_CENTER_MATCH_THRESHOLD:
+                cls._last_decided_state = IconState.IDLE_RECOVERY
                 cls._note_icon_decision()
                 return (
                     IconState.IDLE_RECOVERY,
@@ -1487,12 +1521,15 @@ class FishingEngine:
                 config, (target.width, target.height)
             )
             if config.window_backend == "ok":
-                return self._get_ok_window_backend(target).capture_region(
-                    target,
-                    config.target_button_offset,
-                    roi_width,
-                    roi_height,
-                )
+                # 持锁跨越「取得＋使用」：避免另一线程在取得与截图之间
+                # 关闭同一个 WGC 会话（borrow/use/close 竞态）。
+                with self._backend_lock:
+                    return self._get_ok_window_backend(target).capture_region(
+                        target,
+                        config.target_button_offset,
+                        roi_width,
+                        roi_height,
+                    )
             return window_target.capture_window_region(
                 target.handle,
                 config.target_button_offset,
@@ -1511,7 +1548,10 @@ class FishingEngine:
             target = self._resolve_target_window(config)
             self._maintain_background_hover(target, config)
             if config.window_backend == "ok":
-                return self._get_ok_window_backend(target).capture_frame(target)
+                with self._backend_lock:
+                    return self._get_ok_window_backend(target).capture_frame(
+                        target
+                    )
             return window_target.capture_window_frame(target.handle)
         if screen is None:
             raise RuntimeError("屏幕截图服务未初始化。")
@@ -2432,7 +2472,9 @@ class FishingEngine:
         if not confirmed:
             return False
 
-        message_kind, confidence = max(confirmed, key=lambda item: item[1])
+        # 早退后的相似度只保证过阈值、彼此不可比较：用固定优先序
+        # （钓竿优先），不按分数排序。
+        message_kind, confidence = confirmed[0]
         return self._stop_for_blocking_message(message_kind, confidence)
 
     def _stop_for_blocking_message(self, message_kind: str, confidence: float) -> bool:
@@ -2484,8 +2526,9 @@ class FishingEngine:
     ) -> None:
         if self._pending_recast_at is None:
             return
-        if not config.auto_resume_fishing:
-            # 等待续钓期间用户关掉了自动续钓：撤销待发按键。
+        # 帧首快照与实时设置任一显示已关闭都撤销：用户可能在本帧
+        # 处理期间才取消自动续钓，送键前必须以实时设置为准。
+        if not config.auto_resume_fishing or not self.config().auto_resume_fishing:
             self._pending_recast_at = None
             self._pending_recast_reason = ""
             self._refresh_hover_before_recast = False
@@ -2511,10 +2554,14 @@ class FishingEngine:
         self._last_recovery_at = time.monotonic()
         self._idle_frames = 0
         was_enabled = self._enabled.is_set()
+        generation = self._interrupt_generation
         self._tap_key("w", config.recovery_key_hold_ms, config)
         time.sleep(config.recovery_pause_ms / 1000)
         if was_enabled and (
-            not self._enabled.is_set() or self._shutdown.is_set()
+            not self._enabled.is_set()
+            or self._shutdown.is_set()
+            # 代数比对能识破「停止后又立刻重启」的 ABA 情形。
+            or generation != self._interrupt_generation
         ):
             # Esc / 暂停必须是可靠的送键取消边界：W 之后的停顿期间
             # 被停止时，不再补送 S（焦点可能已切到其他程序）。
@@ -2549,7 +2596,8 @@ class FishingEngine:
         if not force and now - self._last_background_hover_at < 0.40:
             return
         if config.window_backend == "ok":
-            self._get_ok_window_backend(target).keep_hover(target, offset)
+            with self._backend_lock:
+                self._get_ok_window_backend(target).keep_hover(target, offset)
         else:
             window_target.post_mouse_move(target.handle, offset)
         self._last_background_hover_at = now
@@ -2580,10 +2628,11 @@ class FishingEngine:
             )
 
         if config.window_backend == "ok":
-            backend = self._get_ok_window_backend(target)
-            backend.keep_hover(target, neutral)
-            time.sleep(self.BACKGROUND_HOVER_REFRESH_DELAY_SECONDS)
-            backend.keep_hover(target, offset)
+            with self._backend_lock:
+                backend = self._get_ok_window_backend(target)
+                backend.keep_hover(target, neutral)
+                time.sleep(self.BACKGROUND_HOVER_REFRESH_DELAY_SECONDS)
+                backend.keep_hover(target, offset)
         else:
             window_target.post_mouse_move(target.handle, neutral)
             time.sleep(self.BACKGROUND_HOVER_REFRESH_DELAY_SECONDS)
@@ -2601,7 +2650,8 @@ class FishingEngine:
             target = self._resolve_target_window(config)
             self._maintain_background_hover(target, config, force=True)
             if config.window_backend == "ok":
-                self._get_ok_window_backend(target).tap_key(key)
+                with self._backend_lock:
+                    self._get_ok_window_backend(target).tap_key(key)
             else:
                 window_target.post_key_tap(target.handle, key, activate_message=True)
             return
@@ -2612,7 +2662,8 @@ class FishingEngine:
             target = self._resolve_target_window(config)
             self._maintain_background_hover(target, config, force=True)
             if config.window_backend == "ok":
-                self._get_ok_window_backend(target).tap_key(key, hold_ms)
+                with self._backend_lock:
+                    self._get_ok_window_backend(target).tap_key(key, hold_ms)
             else:
                 window_target.post_key_tap(
                     target.handle, key, hold_ms, activate_message=True

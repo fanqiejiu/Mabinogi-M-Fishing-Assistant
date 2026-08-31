@@ -3,6 +3,7 @@
 import json
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -47,6 +48,18 @@ class ConfigRobustnessTests(unittest.TestCase):
     def test_string_button_center_is_not_split_into_characters(self) -> None:
         config = _load_raw_config(
             json.dumps({"schema_version": 14, "button_center": "ab"})
+        )
+        self.assertIsNone(config.button_center)
+
+    def test_infinite_number_in_config_falls_back_to_defaults(self) -> None:
+        # json.loads 会把 1e309 解析成 infinity；int(inf) 抛 OverflowError。
+        self.assertEqual(
+            _load_raw_config('{"schema_version": 1e309}'), default_config()
+        )
+
+    def test_infinite_coordinate_is_dropped(self) -> None:
+        config = _load_raw_config(
+            json.dumps({"schema_version": 14, "button_center": [1e309, 0]})
         )
         self.assertIsNone(config.button_center)
 
@@ -142,6 +155,40 @@ class RecoveryCancellationTests(unittest.TestCase):
         press.assert_not_called()
         self.assertIsNone(engine._pending_recast_at)
 
+    def test_pending_recast_rechecks_live_auto_resume_setting(self) -> None:
+        """monitor 帧首快照仍为 True、用户随后关闭：送键前必须读实时设置。"""
+        engine = FishingEngine()
+        engine._config = AppConfig(auto_resume_fishing=False)
+        stale_frame_config = AppConfig(auto_resume_fishing=True)
+        engine._pending_recast_at = 1.0
+        engine._pending_recast_reason = "测试"
+
+        with patch("fishing_assistant.engine.pyautogui.press") as press:
+            engine._perform_pending_recast(
+                2.0, IconState.READY_TO_CAST, stale_frame_config
+            )
+
+        press.assert_not_called()
+
+    def test_stop_restart_during_recovery_still_cancels_second_key(self) -> None:
+        """W 之后的停顿内快速停止又启动（ABA）：旧恢复序列不得补送 S。"""
+        engine = FishingEngine()
+        engine._enabled.set()
+        config = AppConfig(recovery_pause_ms=0)
+        taps = []
+
+        def tap(key: str, _hold_ms: int, _config: AppConfig) -> None:
+            taps.append(key)
+            if key == "w":
+                engine.set_monitoring(False)
+                engine._enabled.set()
+
+        with patch.object(engine, "_tap_key", side_effect=tap):
+            engine._recover_idle_state(config)
+
+        engine._shutdown.set()
+        self.assertEqual(taps, ["w"])
+
 
 class HotkeyListenerRobustnessTests(unittest.TestCase):
     """快捷键回调里的异常不能杀死 pynput 监听线程。"""
@@ -179,6 +226,34 @@ class HotkeyListenerRobustnessTests(unittest.TestCase):
                 result = engine.set_monitoring(True)
             except RuntimeError:
                 self.fail("set_monitoring 让 RuntimeError 逃逸到快捷键线程。")
+
+        self.assertFalse(result)
+        self.assertFalse(engine.is_monitoring())
+
+    def test_start_monitoring_survives_window_vanishing_before_hover(self) -> None:
+        """第二次 resolve 成功、hover 阶段窗口才消失：同样不得抛异常。"""
+        target = WindowInfo(101, "瑪奇 Mobile", 0, 0, 1920, 1080)
+        engine = FishingEngine()
+        engine._config = AppConfig(
+            capture_mode="window",
+            window_backend="printwindow",
+            catch_strategy="instant",
+            target_window_handle=target.handle,
+            target_window_title=target.title,
+            target_button_offset=(1600, 860),
+        )
+
+        with patch.object(
+            engine, "_resolve_target_window", return_value=target
+        ), patch.object(
+            engine,
+            "_maintain_background_hover",
+            side_effect=RuntimeError("窗口已关闭"),
+        ):
+            try:
+                result = engine.set_monitoring(True)
+            except RuntimeError:
+                self.fail("hover 阶段的 RuntimeError 逃逸出 set_monitoring。")
 
         self.assertFalse(result)
         self.assertFalse(engine.is_monitoring())
@@ -239,6 +314,101 @@ class StrategySwitchTests(unittest.TestCase):
         press.assert_called_once_with("space")
 
 
+class BlockingMessagePriorityTests(unittest.TestCase):
+    """早退后的相似度不可参与排序：阻塞讯息用固定优先序。"""
+
+    def test_blocking_message_priority_is_fixed_not_score_based(self) -> None:
+        events = []
+        engine = FishingEngine(events.append)
+        engine._enabled.set()
+        with patch("fishing_assistant.engine.record_error"):
+            # 两种提示各确认两帧；rod 分数被早退压低、inventory 分数较高。
+            engine._handle_blocking_messages(0.72, 0.95)
+            engine._handle_blocking_messages(0.72, 0.95)
+
+        error_events = [e for e in events if e.kind == EventKind.ERROR]
+        self.assertEqual(len(error_events), 1)
+        self.assertIn("必須配戴釣竿", error_events[0].message)
+
+
+class ScaleSafetyInvariantTests(unittest.TestCase):
+    """尺度限缩的安全不变式：hint 只收判定级命中、重试闸覆盖死区。"""
+
+    def test_icon_hint_floor_not_below_decision_threshold(self) -> None:
+        # 过渡帧的垃圾命中（0.70-0.85）若能写入 hint，会把该模板限缩在
+        # 错误尺度上且分数落入重试死区，永远救不回来。
+        self.assertGreaterEqual(
+            FishingEngine.OK_ICON_HINT_MIN_CONFIDENCE,
+            FishingEngine.OK_ICON_MATCH_THRESHOLD,
+        )
+
+    def test_retry_gate_covers_all_hint_recordable_scores(self) -> None:
+        self.assertLessEqual(
+            FishingEngine.OK_SCALE_RETRY_MIN_CONFIDENCE,
+            FishingEngine.OK_SCALE_HINT_MIN_CONFIDENCE,
+        )
+
+    def test_restricted_decision_on_state_change_is_verified_full_range(
+        self,
+    ) -> None:
+        """限缩扫描下的「转态判定」必须全幅复验，以全幅结果为准。"""
+        calls = []
+
+        def fake_score(bgr, scales_override=None):
+            calls.append(scales_override is None)
+            if scales_override is None:
+                return [
+                    (IconState.HORSE_MOUNT_PROMPT, 0.90),
+                    (IconState.WAITING_BITE, 0.50),
+                ]
+            return [
+                (IconState.WAITING_BITE, 0.95),
+                (IconState.HORSE_MOUNT_PROMPT, 0.60),
+            ]
+
+        FishingEngine._scale_hints["icon_waiting_bite"] = 1.0
+        FishingEngine._last_decided_state = IconState.WAITING_BITE
+        try:
+            with patch.object(
+                FishingEngine, "_score_icon_templates", side_effect=fake_score
+            ):
+                state, _conf, _second = FishingEngine.ok_icon_state_match(
+                    np.zeros((180, 160, 3), dtype=np.uint8)
+                )
+        finally:
+            FishingEngine._scale_hints.clear()
+            FishingEngine._last_decided_state = None
+
+        self.assertEqual(calls, [True, False])
+        self.assertEqual(state, IconState.WAITING_BITE)
+
+    def test_restricted_decision_on_same_state_skips_verification(self) -> None:
+        calls = []
+
+        def fake_score(bgr, scales_override=None):
+            calls.append(scales_override is None)
+            return [
+                (IconState.WAITING_BITE, 0.95),
+                (IconState.READY_TO_CAST, 0.50),
+            ]
+
+        FishingEngine._scale_hints["icon_waiting_bite"] = 1.0
+        FishingEngine._last_decided_state = IconState.WAITING_BITE
+        try:
+            with patch.object(
+                FishingEngine, "_score_icon_templates", side_effect=fake_score
+            ):
+                state, _conf, _second = FishingEngine.ok_icon_state_match(
+                    np.zeros((180, 160, 3), dtype=np.uint8)
+                )
+        finally:
+            FishingEngine._scale_hints.clear()
+            FishingEngine._last_decided_state = None
+
+        self.assertEqual(calls, [True])
+        self.assertEqual(state, IconState.WAITING_BITE)
+
+
 class OkBackendLifecycleTests(unittest.TestCase):
     """WGC backend 的建立必须串行化，避免双 session 洩漏。"""
 
@@ -276,6 +446,57 @@ class OkBackendLifecycleTests(unittest.TestCase):
                 thread.join()
 
         self.assertEqual(len(created), 1)
+
+    def test_backend_close_waits_for_inflight_capture(self) -> None:
+        """borrow/use/close 竞态：关闭必须等待进行中的截图完成。"""
+        order = []
+        capture_started = threading.Event()
+        release_capture = threading.Event()
+
+        class SlowBackend:
+            def __init__(self, info: WindowInfo) -> None:
+                self.handle = info.handle
+
+            def update(self, _info: WindowInfo) -> None:
+                pass
+
+            def capture_region(self, *_args) -> np.ndarray:
+                order.append("cap_start")
+                capture_started.set()
+                release_capture.wait(2)
+                order.append("cap_end")
+                return np.zeros((180, 160, 4), dtype=np.uint8)
+
+            def close(self) -> None:
+                order.append("close")
+
+        target = WindowInfo(101, "瑪奇 Mobile", 0, 0, 1920, 1080)
+        engine = FishingEngine()
+        config = AppConfig(
+            capture_mode="window",
+            window_backend="ok",
+            target_window_handle=target.handle,
+            target_window_title=target.title,
+            target_button_offset=(1600, 860),
+        )
+        with patch(
+            "fishing_assistant.engine.window_target.OkWindowBackend", SlowBackend
+        ), patch.object(
+            engine, "_resolve_target_window", return_value=target
+        ), patch.object(engine, "_maintain_background_hover"):
+            worker = threading.Thread(
+                target=lambda: engine._capture_frame(None, config)
+            )
+            worker.start()
+            self.assertTrue(capture_started.wait(2))
+            closer = threading.Thread(target=engine._close_ok_window_backend)
+            closer.start()
+            time.sleep(0.15)
+            release_capture.set()
+            worker.join(2)
+            closer.join(2)
+
+        self.assertEqual(order, ["cap_start", "cap_end", "close"])
 
 
 class ScaleHintTests(unittest.TestCase):
@@ -319,6 +540,7 @@ class ScaleRestrictionTests(unittest.TestCase):
     def setUp(self) -> None:
         FishingEngine._scale_hints.clear()
         FishingEngine._no_decision_streak = 0
+        FishingEngine._last_decided_state = None
 
     def test_scales_full_without_own_hint_even_if_others_hinted(self) -> None:
         FishingEngine._scale_hints["icon_other"] = 1.0

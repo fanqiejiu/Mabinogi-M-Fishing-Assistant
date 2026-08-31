@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import sys
 from dataclasses import asdict, dataclass, fields, replace
@@ -144,7 +145,10 @@ def _coerce_point(value: object) -> tuple[int, int] | None:
     if (
         isinstance(value, (list, tuple))
         and len(value) == 2
-        and all(isinstance(item, (int, float)) for item in value)
+        and all(
+            isinstance(item, (int, float)) and math.isfinite(item)
+            for item in value
+        )
     ):
         return int(value[0]), int(value[1])
     return None
@@ -161,8 +165,9 @@ def load_config() -> AppConfig:
         return default_config()
     try:
         return _config_from_raw(raw)
-    except (AttributeError, KeyError, TypeError, ValueError):
+    except (AttributeError, KeyError, OverflowError, TypeError, ValueError):
         # 语法正确但结构损坏的配置不应让应用无法启动。
+        # OverflowError：json 会把 1e309 解析成 infinity，int(inf) 会抛它。
         return default_config()
 
 
