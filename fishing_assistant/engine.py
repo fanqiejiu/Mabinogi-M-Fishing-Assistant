@@ -35,7 +35,8 @@ from .constants import (
     OK_STAMINA_ANCHOR_TEMPLATE_PATH,
     ROD_REQUIRED_TEMPLATE_PATH,
 )
-from .diagnostics import record_error
+from .diagnostics import VISION_DIAGNOSTICS_DIR, record_error
+from .vision import diagnostics as vision_diagnostics
 from .vision import signature as vision_signature
 from .vision.shadow import ShadowRecorder
 from .vision.stamina import find_stamina_bar_v2
@@ -199,6 +200,10 @@ class FishingEngine:
         self._pending_recast_reason = ""
         self._refresh_hover_before_recast = False
         self._startup_probe_active = False
+        # 连续未识别自动取证：起点时间戳 / 上次落盘时间 / 本次会话已落份数。
+        self._unrecognized_since: float | None = None
+        self._last_diag_snapshot_at: float | None = None
+        self._diag_snapshot_count = 0
         self._last_press_at = 0.0
         self._last_recovery_at = 0.0
         self._last_metric_at = 0.0
@@ -261,7 +266,7 @@ class FishingEngine:
         self._listener.start()
         self._emit(
             EventKind.INFO,
-            "助手已就绪：将鼠标停在钓鱼按钮中心后按 F7 即刻校准（不会移动鼠标）；F8 开始/暂停，F9 保存识别区域。",
+            "助手已就绪：将鼠标停在钓鱼按钮中心后按 F7 即刻校准（不会移动鼠标）；F8 开始/暂停，F9 保存识别区域和诊断。",
         )
 
     def close(self) -> None:
@@ -341,6 +346,9 @@ class FishingEngine:
         self._reset_detection()
         if enabled:
             self._startup_probe_active = True
+            self._unrecognized_since = None
+            self._last_diag_snapshot_at = None
+            self._diag_snapshot_count = 0
             self._prepare_stamina_view(config)
             if config.capture_mode == "window":
                 try:
@@ -359,6 +367,7 @@ class FishingEngine:
             self._enabled.set()
             self._schedule_recast(time.monotonic(), config, "监测启动")
             self._emit(EventKind.INFO, self._monitoring_details(config), monitoring=True)
+            self._emit_environment_warnings(config)
             if config.capture_mode == "window" and config.window_backend == "ok":
                 self._emit(EventKind.INFO, "OK WGC 正在预热首帧，首次启动会在画面到达后自动开始识别。", monitoring=True)
             message = (
@@ -403,8 +412,195 @@ class FishingEngine:
             "识别区域快照已保存，可用它确认圆形按钮是否完整包含。",
             debug_image=DEBUG_IMAGE_PATH,
         )
+        self.export_diagnostic_snapshot("F9 手动快照", config=config)
         return DEBUG_IMAGE_PATH
 
+    # 正常收鱼动画只会短暂漏判；持续 20 秒没有任何状态时保存现场。
+    _UNRECOGNIZED_SNAPSHOT_AFTER_S = 20.0
+    _UNRECOGNIZED_SNAPSHOT_COOLDOWN_S = 60.0
+    _UNRECOGNIZED_SNAPSHOT_MAX = 3
+
+    def _diagnostic_capture_context(
+        self,
+        config: AppConfig,
+        *,
+        capture_frame: bool,
+    ) -> tuple[np.ndarray | None, tuple[int, int] | None, dict[str, object]]:
+        """返回完整捕获帧、帧内校准坐标和可序列化的捕获环境。"""
+        capture_info: dict[str, object] = {
+            "capture_mode": config.capture_mode,
+            "display_mode": config.display_mode,
+            "selected_resolution": config.selected_resolution,
+            "monitor_index": config.monitor_index,
+        }
+        if config.capture_mode == "window":
+            target = self._resolve_target_window(config)
+            capture_info.update(
+                target_title=target.title,
+                target_handle=target.handle,
+                expected_size=[target.width, target.height],
+                button_center=list(config.target_button_offset)
+                if config.target_button_offset is not None
+                else None,
+                window_backend=config.window_backend,
+            )
+            frame = (
+                self._capture_stamina_frame(None, config)[:, :, :3].copy()
+                if capture_frame
+                else None
+            )
+            return frame, config.target_button_offset, capture_info
+
+        with mss.MSS() as screen:
+            monitor_index = min(
+                max(1, int(config.monitor_index)), len(screen.monitors) - 1
+            )
+            monitor = screen.monitors[monitor_index]
+            origin_x, origin_y = int(monitor["left"]), int(monitor["top"])
+            expected_size = [int(monitor["width"]), int(monitor["height"])]
+            center = None
+            if config.button_center is not None:
+                center = (
+                    int(config.button_center[0]) - origin_x,
+                    int(config.button_center[1]) - origin_y,
+                )
+            capture_info.update(
+                monitor_index=monitor_index,
+                monitor_origin=[origin_x, origin_y],
+                expected_size=expected_size,
+                button_center=list(center) if center is not None else None,
+            )
+            frame = (
+                np.asarray(screen.grab(monitor))[:, :, :3].copy()
+                if capture_frame
+                else None
+            )
+        return frame, center, capture_info
+
+    def _emit_environment_warnings(
+        self, config: AppConfig | None = None
+    ) -> None:
+        """启动体检只报告有直接证据的风险，失败不会阻碍监测。"""
+        config = config or self.config()
+        capture_info: dict[str, object] = {
+            "capture_mode": config.capture_mode,
+            "display_mode": config.display_mode,
+            "selected_resolution": config.selected_resolution,
+            "monitor_index": config.monitor_index,
+        }
+        try:
+            _frame, _center, capture_info = self._diagnostic_capture_context(
+                config, capture_frame=False
+            )
+        except Exception:
+            pass
+        try:
+            environment = vision_diagnostics.collect_environment(
+                capture_info=capture_info
+            )
+            for message in vision_diagnostics.summarize_environment(environment):
+                self._emit(
+                    EventKind.WARNING,
+                    f"环境体检：{message}",
+                    monitoring=True,
+                )
+        except Exception:
+            pass
+    def _track_unrecognized(
+        self,
+        icon_state: "IconState",
+        now: float,
+        config: AppConfig,
+    ) -> None:
+        """连续未识别超阈值时自动保存现场，并限制频率和每次监测份数。"""
+        if icon_state != IconState.NORMAL:
+            self._unrecognized_since = None
+            return
+        if self._unrecognized_since is None:
+            self._unrecognized_since = now
+            return
+        elapsed = now - self._unrecognized_since
+        if elapsed < self._UNRECOGNIZED_SNAPSHOT_AFTER_S:
+            return
+        if self._diag_snapshot_count >= self._UNRECOGNIZED_SNAPSHOT_MAX:
+            return
+        if (
+            self._last_diag_snapshot_at is not None
+            and now - self._last_diag_snapshot_at
+            < self._UNRECOGNIZED_SNAPSHOT_COOLDOWN_S
+        ):
+            return
+        self._diag_snapshot_count += 1
+        self._last_diag_snapshot_at = now
+        self.export_diagnostic_snapshot(
+            f"连续 {elapsed:.0f} 秒未识别出任何状态", config=config
+        )
+
+    def export_diagnostic_snapshot(
+        self,
+        reason: str,
+        frame: np.ndarray | None = None,
+        config: AppConfig | None = None,
+        out_dir: Path | None = None,
+    ) -> Path | None:
+        """保存环境、逐层识别结果和完整捕获帧；失败只写警示。"""
+        try:
+            config = config or self.config()
+            if frame is None:
+                frame, local_center, capture_info = self._diagnostic_capture_context(
+                    config, capture_frame=True
+                )
+            else:
+                frame = frame[:, :, :3].copy()
+                local_center = (
+                    config.target_button_offset
+                    if config.capture_mode == "window"
+                    else config.button_center
+                )
+                capture_info = {
+                    "capture_mode": config.capture_mode,
+                    "display_mode": config.display_mode,
+                    "selected_resolution": config.selected_resolution,
+                    "monitor_index": config.monitor_index,
+                    "expected_size": [int(frame.shape[1]), int(frame.shape[0])],
+                    "button_center": (
+                        list(local_center) if local_center is not None else None
+                    ),
+                }
+            pipeline = vision_diagnostics.run_pipeline_check(frame, local_center)
+            environment = vision_diagnostics.collect_environment(
+                frame_shape=tuple(frame.shape) if frame is not None else None,
+                capture_info=capture_info,
+            )
+            summary = {
+                "display_mode": config.display_mode,
+                "capture_mode": config.capture_mode,
+                "selected_resolution": config.selected_resolution,
+                "button_center": config.button_center,
+                "target_button_offset": config.target_button_offset,
+                "recognition_backend": config.recognition_backend,
+                "v2_vision_enabled": config.v2_vision_enabled,
+                "monitor_index": config.monitor_index,
+                "window_backend": config.window_backend,
+            }
+            target = out_dir if out_dir is not None else VISION_DIAGNOSTICS_DIR
+            path = vision_diagnostics.write_snapshot(
+                target,
+                frame,
+                reason=reason,
+                environment=environment,
+                pipeline=pipeline,
+                config_summary=summary,
+            )
+        except Exception as error:
+            record_error("export recognition diagnostic", error, extra={"reason": reason})
+            self._emit(EventKind.WARNING, f"识别诊断生成失败：{error}")
+            return None
+        self._emit(
+            EventKind.SUCCESS,
+            f"识别诊断已保存（{reason}）：{path}。文件只保存在本机。",
+        )
+        return path
     @staticmethod
     def _icon_circle_mask(height: int, width: int) -> np.ndarray:
         mask = np.zeros((height, width), dtype=np.uint8)
@@ -1459,6 +1655,7 @@ class FishingEngine:
                         self._shadow_observe(
                             frame[:, :, :3], icon_state, signals, screen, config
                         )
+                    self._track_unrecognized(icon_state, loop_now, config)
                     strategy = self._catch_strategy(config)
                     stamina_sample = None
                     escape_message_confidence = 0.0

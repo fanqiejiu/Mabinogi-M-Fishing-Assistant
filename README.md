@@ -4,7 +4,7 @@
   <img src="fishing_assistant/assets/tomato_fish_icon.png" width="112" alt="番茄鱼项目图标">
 </p>
 
-<p align="center">Windows 本地钓鱼辅助工具 · v0.6.1</p>
+<p align="center">Windows 本地钓鱼辅助工具 · v0.6.2</p>
 
 <p align="center">
   <a href="https://github.com/fanqiejiu/Mabinogi-M-Fishing-Assistant/releases">📥 下载 Release</a> ·
@@ -65,7 +65,7 @@ cd Mabinogi-M-Fishing-Assistant
 2. 在“控制台”选择显示器、画面模式和游戏分辨率。
 3. 在“识别与显示”确认图标识别模式；推荐保留默认的“OK 框架特征识别”。
 4. 默认使用“屏幕坐标模式”。把鼠标放到圆形按钮中心，点击校准或按 `F7`。
-5. 按 `F9` 保存识别区域，确认按钮没有被截断。
+5. 按 `F9` 保存识别区域和完整诊断；完整画面只保存在本机，发送前请确认其中没有不想分享的内容。
 6. 点击“开始监测”或按 `F8`。
 
 想尝试后台模式时：选择“指定窗口后台模式” → 刷新窗口 → 选择“瑪奇 Mobile” → 选择“OK 后台引擎” → 在游戏内重新校准一次。
@@ -74,14 +74,14 @@ cd Mabinogi-M-Fishing-Assistant
 | --- | --- |
 | `F7` | 校准钓鱼按钮中心 |
 | `F8` | 开始 / 暂停监测 |
-| `F9` | 保存当前识别区域 |
+| `F9` | 保存识别区域与完整诊断包 |
 | `Esc` | 紧急停止 |
 
 ## 常见情况
 
 | 情况 | 处理方式 |
 | --- | --- |
-| OK 模式漏掉上钩 | 用 `F9` 检查圆形按钮是否完整；重新校准。仍不兼容时可手动改用旧版像素模式。 |
+| OK 模式漏掉上钩 | 用 `F9` 检查圆形按钮是否完整，并保留逐层识别报告；重新校准。仍不兼容时可手动改用旧版像素模式。 |
 | 旧像素模式漏掉上钩 | 适当降低鱼体阈值，例如 `1000 px`。 |
 | 旧像素模式把普通抛竿当成上钩 | 提高鱼体阈值，例如 `1450 px`。 |
 | 识别区域不完整 | 调大识别区域后重新校准，再用 `F9` 检查快照。 |
@@ -91,9 +91,9 @@ cd Mabinogi-M-Fishing-Assistant
 ## 数据与日志
 
 - 钓鱼配置保存在项目目录的 `fishing_config.json`。
-- 错误日志和诊断 ZIP 位于 `%LOCALAPPDATA%\MabinogiFishingHelper\`。
+- 错误日志和诊断 ZIP 位于 `%LOCALAPPDATA%\MabinogiFishingHelper\`；连续 20 秒无法识别状态时会自动保存现场，每次监测最多 3 份。
 - 硬件型号只在启动时读取一次，用于诊断；不会持续监测。
-- 不会自动上传日志或诊断包。
+- 不会自动上传日志或诊断包。完整识别诊断可能包含角色名或聊天内容，发送前请自行确认。
 - 更新检查仅在手动触发或启用启动检查后访问 GitHub Latest Release API。
 
 ## 基于 ok-script

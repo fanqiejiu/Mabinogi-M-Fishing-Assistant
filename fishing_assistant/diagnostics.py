@@ -18,6 +18,7 @@ from .system_profile import SystemProfile
 _APP_DATA_ROOT = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "MabinogiFishingHelper"
 LOG_DIR = _APP_DATA_ROOT / "logs"
 SUPPORT_DIR = _APP_DATA_ROOT / "support"
+VISION_DIAGNOSTICS_DIR = _APP_DATA_ROOT / "vision-diagnostics"
 PROFILE_PATH = _APP_DATA_ROOT / "system_profile.json"
 _WRITE_LOCK = threading.Lock()
 _system_profile: dict[str, str] | None = None
@@ -86,10 +87,19 @@ def create_support_bundle() -> Path:
             logs = sorted(LOG_DIR.glob("error-*.jsonl"), reverse=True)[:7]
             for log in logs:
                 archive.write(log, f"logs/{log.name}")
+        if VISION_DIAGNOSTICS_DIR.exists():
+            snapshots = sorted(
+                VISION_DIAGNOSTICS_DIR.glob("diagnostic-*.zip"),
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            )[:3]
+            for snapshot in snapshots:
+                archive.write(snapshot, f"vision-diagnostics/{snapshot.name}")
         archive.writestr(
             "README.txt",
             "这是本地生成的诊断包，不会由程序自动上传。\n"
             "如需协助，请由用户自行发送给项目维护者。\n"
-            "包含：错误日志与启动时读取的一次性硬件信息。\n",
+            "包含：错误日志、启动时读取的一次性硬件信息，以及最近的识别诊断。\n"
+            "识别诊断可能包含游戏完整画面；发送前请留意角色名和聊天内容。\n",
         )
     return bundle_path

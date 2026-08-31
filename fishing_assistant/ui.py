@@ -49,7 +49,13 @@ from .constants import (
     APP_VERSION,
     GITHUB_REPOSITORY,
 )
-from .diagnostics import LOG_DIR, create_support_bundle, record_error, set_system_profile
+from .diagnostics import (
+    LOG_DIR,
+    VISION_DIAGNOSTICS_DIR,
+    create_support_bundle,
+    record_error,
+    set_system_profile,
+)
 from .engine import EngineEvent, EventKind, FishingEngine, IconState
 from .system_profile import SystemProfile, collect_system_profile
 from .updates import UpdateResult, check_github_release
@@ -663,7 +669,7 @@ class MainWindow(QMainWindow):
         shortcuts.setHorizontalSpacing(9)
         shortcuts.addWidget(MetricCard("校准", "F7"), 0, 0)
         shortcuts.addWidget(MetricCard("开始 / 暂停", "F8"), 0, 1)
-        shortcuts.addWidget(MetricCard("保存区域", "F9"), 0, 2)
+        shortcuts.addWidget(MetricCard("保存诊断", "F9"), 0, 2)
         layout.addLayout(shortcuts)
         layout.addStretch(1)
 
@@ -1122,7 +1128,7 @@ class MainWindow(QMainWindow):
         hotkey_layout.addWidget(QLabel("全局快捷键"), 0, 0, 1, 2)
         hotkey_layout.itemAtPosition(0, 0).widget().setObjectName("cardTitle")
         for row, (key, description) in enumerate(
-            (("F7", "立即记录当前鼠标位置为钓鱼按钮中心（不移动鼠标）"), ("F8", "开始或暂停监测"), ("F9", "保存当前识别区域"), ("Esc", "紧急停止监测")),
+            (("F7", "立即记录当前鼠标位置为钓鱼按钮中心（不移动鼠标）"), ("F8", "开始或暂停监测"), ("F9", "保存识别区域与完整诊断包"), ("Esc", "紧急停止监测")),
             start=1,
         ):
             key_label = QLabel(key)
@@ -1219,10 +1225,10 @@ class MainWindow(QMainWindow):
         diagnostic_layout.addLayout(
             self._card_heading(
                 "本地错误日志",
-                "发生错误时会写入本机；不会自动上传或发送。需要反馈时，可生成 ZIP 后由你自行发送给作者。",
+                "发生错误时会写入本机；不会自动上传或发送。生成 ZIP 时会附带最近的识别诊断，请在发送前确认画面内容。",
             )
         )
-        local_hint = QLabel(f"日志目录：{LOG_DIR}")
+        local_hint = QLabel(f"日志目录：{LOG_DIR}\n识别诊断目录：{VISION_DIAGNOSTICS_DIR}")
         local_hint.setObjectName("helper")
         local_hint.setWordWrap(True)
         local_hint.setSizePolicy(
@@ -1237,7 +1243,7 @@ class MainWindow(QMainWindow):
         diagnostic_actions.addWidget(self.open_log_button)
         diagnostic_actions.addStretch(1)
         diagnostic_layout.addLayout(diagnostic_actions)
-        self.diagnostic_status = QLabel("诊断包会保存在本机，生成后不会自动发送。")
+        self.diagnostic_status = QLabel("诊断包只保存在本机，不会自动发送；完整画面可能包含角色名或聊天内容。")
         self.diagnostic_status.setObjectName("cardHint")
         self.diagnostic_status.setWordWrap(True)
         diagnostic_layout.addWidget(self.diagnostic_status)
@@ -1852,6 +1858,7 @@ class MainWindow(QMainWindow):
 
     def _create_diagnostic_bundle(self) -> None:
         try:
+            self.engine.export_diagnostic_snapshot("设置页手动生成")
             bundle_path = create_support_bundle()
         except OSError as error:
             record_error("create diagnostic bundle", error)
@@ -2021,7 +2028,7 @@ class MainWindow(QMainWindow):
         elif event.kind == EventKind.SUCCESS:
             self.runtime_detail.setText(event.message)
             if event.debug_image is not None:
-                self.snapshot_status.setText("快照已保存：fishing_roi_debug.png")
+                self.snapshot_status.setText("区域快照与识别诊断已保存")
             self._refresh_calibration_summary()
 
     def _set_runtime_state(self, text: str, state: str = "idle") -> None:
