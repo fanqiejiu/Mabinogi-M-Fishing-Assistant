@@ -41,6 +41,7 @@ class SignatureFeatures:
     dark: float
     bottom_blue: float
     center_white: float
+    center_dark: float
 
 
 # 各状态的 box 判别式：(特征名, 下界, 上界)；上/下界为 None 表示单边。
@@ -71,6 +72,9 @@ _STATE_RULES: dict[str, tuple[tuple[str, float | None, float | None], ...]] = {
         # green 条件隔离（hooked 要求 green>=0.45，idle 要求 <0.35）。
         ("red", None, 0.12),
         ("green", None, 0.35),
+        # 真指南针中心必有黑点（实测 0.88-1.0）；收鱼奖励动画、读条
+        # 浮水印等白色叠加画面该值为 0，是最强的 idle 真伪判别。
+        ("center_dark", 0.50, None),
     ),
 }
 
@@ -133,6 +137,7 @@ def extract_signature(
             / (total / 2)
         ),
         center_white=float(white_mask[22:42, 22:42].sum() / 400),
+        center_dark=float((val[28:36, 28:36] < 100).sum() / 64),
     )
 
 

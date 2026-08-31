@@ -113,6 +113,19 @@ class SignatureGoldenSetTests(unittest.TestCase):
         state, _ = self._classify_file("dryrun2/tr_00000_normal.png")
         self.assertIn(state, ("unknown", "no-circle"))
 
+    def test_reward_overlay_is_rejected(self) -> None:
+        # 收鱼奖励动画（半透明鱼浮水印+金光）曾以 0.26-0.49 低信心穿过
+        # idle 判别式（实机 shadow 实证）；真指南针中心必有黑点，浮水印
+        # 没有——中心暗点特征必须把这类画面挡在 idle 之外。
+        overlay_dir = self.frames / "shadow1" / "v2_shadow"
+        frames = sorted(overlay_dir.glob("diff_normal-vs-idle_recovery_*.png"))
+        if not frames:
+            self.skipTest("shadow1 奖励动画分歧帧不在帧库中")
+        for path in frames:
+            state, _ = self._classify_file(f"shadow1/v2_shadow/{path.name}")
+            with self.subTest(frame=path.name):
+                self.assertIn(state, ("unknown", "no-circle"))
+
     def test_transition_frame_anchor_cases(self) -> None:
         # 人工核对过画面真值的过渡帧锚点（引擎标签为 normal 的转态时刻）：
         # 画面呈现清晰状态外观的判成该状态；杂合叠加画面（指南针盖住
