@@ -121,6 +121,23 @@ class FishingEngine:
     BACKGROUND_HOVER_REFRESH_DELAY_SECONDS = 0.08
     OK_ICON_MATCH_THRESHOLD = 0.86
     OK_ICON_MATCH_MARGIN = 0.04
+    # 游戏窗口尺寸在会话内不变：记住每类模板上次命中的尺度，
+    # 下一帧优先尝试；高置信命中后提前结束扫描，压低每帧匹配成本。
+    OK_SCALE_HINT_MIN_CONFIDENCE = 0.70
+    # 早退只用于纯阈值判定的扫描（文字/锚点）；主图标与旋转指南针靠
+    # 「最高分与次高分的差距」判别，早退会把相似模板的分数一起压到
+    # 早退线附近、抹掉 margin，因此那两处必须扫完取真实最高分。
+    # 窗口尺寸在会话内不变，因此每个模板自己命中过的尺度会重复有效；
+    # 但不同模板的正确尺度互不可推（裁剪后的原生尺寸各异），所以只用
+    # 「该模板自己的历史命中尺度」限缩扫描，没有历史就扫全范围。
+    # 连续未判定时每 N 帧回退一次全范围扫描，兼容用户中途改窗口大小。
+    OK_SCALE_LOCK_NEIGHBORS = 3
+    OK_SCALE_RESCAN_EVERY = 8
+    # 受限扫描下最高分接近判定门槛却失败时（相似图标吃了尺度限制的亏），
+    # 当帧立刻回退全范围重扫主模板，避免锁尺度造成漏判。
+    OK_SCALE_RETRY_MIN_CONFIDENCE = 0.80
+    # 上钩期间反弹窗口按 ~60ms 采样节奏设计，主循环睡眠必须跟着缩短。
+    PENDING_RESOLUTION_POLL_SECONDS = 0.015
     OK_IDLE_ROTATED_MATCH_THRESHOLD = 0.82
     OK_IDLE_ROTATED_MATCH_MARGIN = 0.025
     # 实机 WGC 画面中的指南针会因缩放与背景导致整图分数降到约 0.45～0.55。
@@ -153,6 +170,8 @@ class FishingEngine:
     _ok_idle_rotated_templates: tuple[np.ndarray, ...] | None = None
     _ok_idle_center_template: np.ndarray | None = None
     _stamina_anchor_template: np.ndarray | None = None
+    _scale_hints: dict[str, float] = {}
+    _no_decision_streak = 0
 
     def __init__(self, event_callback: EventCallback | None = None) -> None:
         self._config = load_config()
@@ -593,6 +612,7 @@ class FishingEngine:
             baseline_scale=1.0,
             category_name="stamina_fish_anchor",
             use_gray_scale=False,
+            early_exit_confidence=cls.STAMINA_ANCHOR_MATCH_THRESHOLD,
         )
 
     @classmethod
@@ -806,6 +826,38 @@ class FishingEngine:
         return cls._ok_feature_set
 
     @classmethod
+    def _category_scan_scales(
+        cls, category_name: str, scales: np.ndarray
+    ) -> np.ndarray:
+        """只有该模板自己命中过才限缩扫描范围；不跨模板推断尺度。"""
+        hint = cls._scale_hints.get(category_name)
+        if hint is None or (
+            cls._no_decision_streak > 0
+            and cls._no_decision_streak % cls.OK_SCALE_RESCAN_EVERY == 0
+        ):
+            return scales
+        nearest = sorted(
+            (float(scale) for scale in scales),
+            key=lambda scale: abs(scale - hint),
+        )[: cls.OK_SCALE_LOCK_NEIGHBORS]
+        return np.array(sorted(nearest))
+
+    @classmethod
+    def _note_icon_decision(cls) -> None:
+        cls._no_decision_streak = 0
+
+    @classmethod
+    def _ordered_scales(
+        cls, category_name: str, scales: np.ndarray
+    ) -> list[float]:
+        """把上次命中的尺度排到最前面，让稳定会话第一次尝试就命中。"""
+        values = [float(scale) for scale in scales]
+        hint = cls._scale_hints.get(category_name)
+        if hint is None:
+            return values
+        return sorted(values, key=lambda scale: abs(scale - hint))
+
+    @classmethod
     def _ok_multiscale_confidence(
         cls,
         bgr: np.ndarray,
@@ -818,6 +870,7 @@ class FishingEngine:
         baseline_scale: float,
         category_name: str,
         use_gray_scale: bool = True,
+        early_exit_confidence: float | None = None,
     ) -> float:
         """通过 OK FeatureSet 在指定区域执行多尺度灰度模板识别。"""
         if (
@@ -851,12 +904,13 @@ class FishingEngine:
         )
         feature_set = cls._get_ok_feature_set()
         best = 0.0
-        for scale in scales:
+        best_scale: float | None = None
+        for scale in cls._ordered_scales(category_name, scales):
             candidate = cv2.resize(
                 baseline,
                 (
-                    max(1, round(baseline.shape[1] * float(scale))),
-                    max(1, round(baseline.shape[0] * float(scale))),
+                    max(1, round(baseline.shape[1] * scale)),
+                    max(1, round(baseline.shape[0] * scale)),
                 ),
                 interpolation=cv2.INTER_AREA,
             )
@@ -878,7 +932,17 @@ class FishingEngine:
                 limit=1,
             )
             if boxes:
-                best = max(best, float(boxes[0].confidence))
+                confidence = float(boxes[0].confidence)
+                if confidence > best:
+                    best = confidence
+                    best_scale = scale
+                if (
+                    early_exit_confidence is not None
+                    and best >= early_exit_confidence
+                ):
+                    break
+        if best_scale is not None and best >= cls.OK_SCALE_HINT_MIN_CONFIDENCE:
+            cls._scale_hints[category_name] = best_scale
         return best
 
     @classmethod
@@ -890,6 +954,8 @@ class FishingEngine:
         search_top_ratio: float,
         search_bottom_ratio: float,
         scales: np.ndarray,
+        category_name: str = "runtime_text_template",
+        early_exit_confidence: float | None = None,
     ) -> float:
         return cls._ok_multiscale_confidence(
             bgr,
@@ -899,7 +965,8 @@ class FishingEngine:
             scales=scales,
             normalized_width=960,
             baseline_scale=0.5,
-            category_name="runtime_text_template",
+            category_name=category_name,
+            early_exit_confidence=early_exit_confidence,
         )
 
     @classmethod
@@ -911,6 +978,8 @@ class FishingEngine:
             search_top_ratio=0.25,
             search_bottom_ratio=1.0,
             scales=np.linspace(0.80, 1.20, 9),
+            category_name="text_fish_escape",
+            early_exit_confidence=cls.ESCAPE_MESSAGE_MATCH_THRESHOLD,
         )
 
     @classmethod
@@ -922,6 +991,8 @@ class FishingEngine:
             search_top_ratio=0.0,
             search_bottom_ratio=0.45,
             scales=np.linspace(0.75, 1.30, 12),
+            category_name="text_rod_required",
+            early_exit_confidence=cls.ROD_REQUIRED_MATCH_THRESHOLD,
         )
 
     @classmethod
@@ -933,6 +1004,8 @@ class FishingEngine:
             search_top_ratio=0.0,
             search_bottom_ratio=0.45,
             scales=np.linspace(0.75, 1.30, 12),
+            category_name="text_inventory_full",
+            early_exit_confidence=cls.INVENTORY_FULL_MATCH_THRESHOLD,
         )
 
     @classmethod
@@ -964,6 +1037,7 @@ class FishingEngine:
             baseline_scale=0.5,
             category_name="inventory_full_icon",
             use_gray_scale=False,
+            early_exit_confidence=cls.INVENTORY_FULL_ICON_MATCH_THRESHOLD,
         )
 
     @staticmethod
@@ -1087,20 +1161,28 @@ class FishingEngine:
                 ).astype(np.uint8)
         return cls._ok_idle_center_template
 
+    OK_ICON_FULL_SCALES = np.linspace(0.78, 1.28, 11)
+
     @classmethod
-    def ok_icon_state_match(
-        cls, bgr: np.ndarray
-    ) -> tuple[IconState | None, float, float]:
-        """返回 OK 状态及分数；未过阈值时保留分数但状态为空。"""
+    def _score_icon_templates(
+        cls, bgr: np.ndarray, scales_override: np.ndarray | None = None
+    ) -> list[tuple[IconState, float]]:
         scores: list[tuple[IconState, float]] = []
         for state_name, template in cls._get_ok_icon_templates().items():
+            scales = (
+                scales_override
+                if scales_override is not None
+                else cls._category_scan_scales(
+                    f"icon_{state_name}", cls.OK_ICON_FULL_SCALES
+                )
+            )
             try:
                 confidence = cls._ok_multiscale_confidence(
                     bgr,
                     template,
                     search_top_ratio=0.0,
                     search_bottom_ratio=1.0,
-                    scales=np.linspace(0.78, 1.28, 11),
+                    scales=scales,
                     normalized_width=cls.OK_ICON_NORMALIZED_WIDTH,
                     baseline_scale=1.0,
                     category_name=f"icon_{state_name}",
@@ -1108,16 +1190,46 @@ class FishingEngine:
                 scores.append((IconState(state_name), confidence))
             except (ValueError, cv2.error):
                 continue
-        if not scores:
-            return None, 0.0, 0.0
-        scores.sort(key=lambda item: item[1], reverse=True)
-        best_state, best_confidence = scores[0]
-        second_confidence = scores[1][1] if len(scores) > 1 else 0.0
+        return scores
+
+    @classmethod
+    def _decide_icon(
+        cls, scores: list[tuple[IconState, float]]
+    ) -> tuple[IconState | None, float, float]:
+        ordered = sorted(scores, key=lambda item: item[1], reverse=True)
+        best_state, best_confidence = ordered[0]
+        second_confidence = ordered[1][1] if len(ordered) > 1 else 0.0
         if (
             best_confidence >= cls.OK_ICON_MATCH_THRESHOLD
             and best_confidence - second_confidence >= cls.OK_ICON_MATCH_MARGIN
         ):
             return best_state, best_confidence, second_confidence
+        return None, best_confidence, second_confidence
+
+    @classmethod
+    def ok_icon_state_match(
+        cls, bgr: np.ndarray
+    ) -> tuple[IconState | None, float, float]:
+        """返回 OK 状态及分数；未过阈值时保留分数但状态为空。"""
+        scores = cls._score_icon_templates(bgr)
+        if not scores:
+            return None, 0.0, 0.0
+        decided, best_confidence, second_confidence = cls._decide_icon(scores)
+        if (
+            decided is None
+            and cls._scale_hints
+            and best_confidence >= cls.OK_SCALE_RETRY_MIN_CONFIDENCE
+        ):
+            # 近判定却失败：可能吃了尺度限缩的亏，当帧全范围重扫一次。
+            scores = cls._score_icon_templates(
+                bgr, scales_override=cls.OK_ICON_FULL_SCALES
+            )
+            decided, best_confidence, second_confidence = cls._decide_icon(
+                scores
+            )
+        if decided is not None:
+            cls._note_icon_decision()
+            return decided, best_confidence, second_confidence
 
         # 指南针指针会随人物方向旋转。普通模板未过门槛时，再用 GIF 真实方向帧复核；
         # 仍由 OK FeatureSet 完成匹配，不借用旧像素规则。
@@ -1129,23 +1241,6 @@ class FishingEngine:
             ),
             default=0.0,
         )
-        for index, template in enumerate(cls._get_ok_idle_rotated_templates()):
-            try:
-                idle_confidence = max(
-                    idle_confidence,
-                    cls._ok_multiscale_confidence(
-                        bgr,
-                        template,
-                        search_top_ratio=0.0,
-                        search_bottom_ratio=1.0,
-                        scales=np.array([0.72, 0.75, 0.78, 0.81, 0.86, 0.94, 1.02, 1.10, 1.18]),
-                        normalized_width=cls.OK_ICON_NORMALIZED_WIDTH,
-                        baseline_scale=1.0,
-                        category_name=f"icon_idle_rotated_{index}",
-                    ),
-                )
-            except (ValueError, cv2.error):
-                continue
         non_idle_confidence = max(
             (
                 confidence
@@ -1154,11 +1249,40 @@ class FishingEngine:
             ),
             default=0.0,
         )
+        rotated_full_scales = np.array(
+            [0.72, 0.75, 0.78, 0.81, 0.86, 0.94, 1.02, 1.10, 1.18]
+        )
+        for index, template in enumerate(cls._get_ok_idle_rotated_templates()):
+            # 判定条件一旦满足就停止扫描剩余方向帧：结论不变，成本立减。
+            if (
+                idle_confidence >= cls.OK_IDLE_ROTATED_MATCH_THRESHOLD
+                and idle_confidence - non_idle_confidence
+                >= cls.OK_IDLE_ROTATED_MATCH_MARGIN
+            ):
+                break
+            try:
+                rotated_confidence = cls._ok_multiscale_confidence(
+                    bgr,
+                    template,
+                    search_top_ratio=0.0,
+                    search_bottom_ratio=1.0,
+                    scales=cls._category_scan_scales(
+                        f"icon_idle_rotated_{index}", rotated_full_scales
+                    ),
+                    normalized_width=cls.OK_ICON_NORMALIZED_WIDTH,
+                    baseline_scale=1.0,
+                    category_name=f"icon_idle_rotated_{index}",
+                )
+            except (ValueError, cv2.error):
+                continue
+            if rotated_confidence > idle_confidence:
+                idle_confidence = rotated_confidence
         if (
             idle_confidence >= cls.OK_IDLE_ROTATED_MATCH_THRESHOLD
             and idle_confidence - non_idle_confidence
             >= cls.OK_IDLE_ROTATED_MATCH_MARGIN
         ):
+            cls._note_icon_decision()
             return (
                 IconState.IDLE_RECOVERY,
                 idle_confidence,
@@ -1183,15 +1307,18 @@ class FishingEngine:
                     normalized_width=cls.OK_ICON_NORMALIZED_WIDTH,
                     baseline_scale=1.0,
                     category_name="icon_idle_center_anchor",
+                    early_exit_confidence=cls.OK_IDLE_CENTER_MATCH_THRESHOLD,
                 )
             except (ValueError, cv2.error):
                 center_confidence = 0.0
             if center_confidence >= cls.OK_IDLE_CENTER_MATCH_THRESHOLD:
+                cls._note_icon_decision()
                 return (
                     IconState.IDLE_RECOVERY,
                     max(idle_confidence, center_confidence),
                     non_idle_confidence,
                 )
+        cls._no_decision_streak += 1
         return None, max(best_confidence, idle_confidence), second_confidence
 
     def _on_key_press(
@@ -1338,7 +1465,11 @@ class FishingEngine:
                         )
                         consecutive_failures = 0
                 # 配置文件可能被手改成非法值；负数会让 sleep 抛异常杀死本线程。
-                time.sleep(max(0, config.poll_interval_ms) / 1000)
+                # 上钩期间体力扫描自带节流，主循环改用短睡眠保住反弹采样节奏。
+                if self._fish_resolution_pending:
+                    time.sleep(self.PENDING_RESOLUTION_POLL_SECONDS)
+                else:
+                    time.sleep(max(0, config.poll_interval_ms) / 1000)
         except Exception as error:  # pragma: no cover - mss 初始化失败
             # 线程即将退出；必须同步清掉监测标志，避免界面停留在“监测中”假状态。
             self._enabled.clear()

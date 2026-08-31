@@ -278,6 +278,139 @@ class OkBackendLifecycleTests(unittest.TestCase):
         self.assertEqual(len(created), 1)
 
 
+class ScaleHintTests(unittest.TestCase):
+    """多尺度匹配应记住上次命中的尺度：窗口尺寸在会话内不变。"""
+
+    def test_scales_are_reordered_around_recorded_hint(self) -> None:
+        FishingEngine._scale_hints.pop("unit_test_category", None)
+        scales = np.array([0.8, 0.9, 1.0, 1.1, 1.2])
+        default_order = FishingEngine._ordered_scales(
+            "unit_test_category", scales
+        )
+        self.assertEqual(default_order, [0.8, 0.9, 1.0, 1.1, 1.2])
+
+        FishingEngine._scale_hints["unit_test_category"] = 1.1
+        hinted = FishingEngine._ordered_scales("unit_test_category", scales)
+        self.assertEqual(hinted[0], 1.1)
+        self.assertEqual(sorted(hinted), default_order)
+
+    def test_confident_icon_match_records_scale_hint(self) -> None:
+        import cv2
+
+        from fishing_assistant.constants import OK_ICON_TEMPLATE_PATHS
+
+        FishingEngine._scale_hints.clear()
+        frame = cv2.imread(
+            str(OK_ICON_TEMPLATE_PATHS["waiting_bite"]), cv2.IMREAD_COLOR
+        )
+        self.assertIsNotNone(frame)
+        state, _signals = FishingEngine.classify_frame_state(
+            frame, AppConfig(recognition_backend="ok")
+        )
+        self.assertEqual(state, IconState.WAITING_BITE)
+        self.assertIn("icon_waiting_bite", FishingEngine._scale_hints)
+
+
+class ScaleRestrictionTests(unittest.TestCase):
+    """每个模板只信自己的历史命中尺度；不同模板之间尺度不可互推。"""
+
+    FULL_SCALES = np.linspace(0.78, 1.28, 11)
+
+    def setUp(self) -> None:
+        FishingEngine._scale_hints.clear()
+        FishingEngine._no_decision_streak = 0
+
+    def test_scales_full_without_own_hint_even_if_others_hinted(self) -> None:
+        FishingEngine._scale_hints["icon_other"] = 1.0
+        scales = FishingEngine._category_scan_scales(
+            "icon_mine", self.FULL_SCALES
+        )
+        self.assertEqual(len(scales), 11)
+
+    def test_scales_restricted_with_own_hint(self) -> None:
+        FishingEngine._scale_hints["icon_mine"] = 1.02
+        restricted = FishingEngine._category_scan_scales(
+            "icon_mine", self.FULL_SCALES
+        )
+        self.assertEqual(len(restricted), 3)
+        self.assertTrue(
+            all(abs(float(scale) - 1.02) <= 0.075 for scale in restricted)
+        )
+
+    def test_no_decision_streak_triggers_periodic_full_rescan(self) -> None:
+        FishingEngine._scale_hints["icon_mine"] = 1.02
+        FishingEngine._no_decision_streak = 8
+        scales = FishingEngine._category_scan_scales(
+            "icon_mine", self.FULL_SCALES
+        )
+        self.assertEqual(len(scales), 11)
+
+    def test_decision_resets_no_decision_streak(self) -> None:
+        import cv2
+
+        from fishing_assistant.constants import OK_ICON_TEMPLATE_PATHS
+
+        FishingEngine._no_decision_streak = 5
+        frame = cv2.imread(
+            str(OK_ICON_TEMPLATE_PATHS["waiting_bite"]), cv2.IMREAD_COLOR
+        )
+        self.assertIsNotNone(frame)
+        state, _confidence, _second = FishingEngine.ok_icon_state_match(frame)
+        self.assertEqual(state, IconState.WAITING_BITE)
+        self.assertEqual(FishingEngine._no_decision_streak, 0)
+
+    def test_all_reference_icons_recognized_with_hints_active(self) -> None:
+        """相似模板（上马/下马）不能因其他模板的 hint 而漏判。"""
+        import cv2
+
+        from fishing_assistant.constants import OK_ICON_TEMPLATE_PATHS
+
+        for state_name, path in OK_ICON_TEMPLATE_PATHS.items():
+            frame = cv2.imread(str(path), cv2.IMREAD_COLOR)
+            state, _signals = FishingEngine.classify_frame_state(
+                frame, AppConfig(recognition_backend="ok")
+            )
+            self.assertEqual(state, IconState(state_name))
+
+
+class PendingResolutionCadenceTests(unittest.TestCase):
+    """上钩期间主循环必须缩短睡眠：反弹窗口按 ~60ms 节奏设计。"""
+
+    def test_pending_resolution_uses_short_poll_sleep(self) -> None:
+        engine = FishingEngine()
+        engine._config = AppConfig(
+            capture_mode="window",
+            window_backend="ok",
+            target_button_offset=(1600, 860),
+            poll_interval_ms=75,
+        )
+        engine._enabled.set()
+        engine._fish_resolution_pending = True
+        frame = np.zeros((180, 160, 3), dtype=np.uint8)
+        signals = IconColorSignals(0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        sleeps = []
+
+        def record_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+            engine._shutdown.set()
+
+        with patch.object(engine, "_capture_frame", return_value=frame), patch.object(
+            FishingEngine,
+            "classify_frame_state",
+            return_value=(IconState.FISH_HOOKED, signals),
+        ), patch.object(engine, "_process_frame"), patch.object(
+            engine, "_capture_stamina_sample", return_value=None
+        ), patch.object(
+            engine, "_capture_escape_message_confidence", return_value=0.0
+        ), patch(
+            "fishing_assistant.engine.time.sleep", side_effect=record_sleep
+        ):
+            engine._monitor_loop()
+
+        self.assertTrue(sleeps)
+        self.assertLessEqual(sleeps[-1], 0.020)
+
+
 class EscapeWatchCharacterizationTests(unittest.TestCase):
     """锁定 escape watch 既有行为，防止无测试路径回归。"""
 
