@@ -121,6 +121,9 @@ class AppConfig:
     github_auto_check: bool = True
     # 检测 v2 影子模式：并行运行新识别链并记录对照，不参与决策。
     v2_shadow_enabled: bool = False
+    # 检测 v2 决策路径：签名层先判（~0.2ms），unknown 帧降级模板仲裁；
+    # 读条定位走降采样粗扫+干净锚点模板。关闭即完全回到旧识别路径。
+    v2_vision_enabled: bool = True
 
     def copy(self, **changes: object) -> "AppConfig":
         return replace(self, **changes)

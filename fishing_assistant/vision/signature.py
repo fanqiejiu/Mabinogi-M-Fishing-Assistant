@@ -59,6 +59,9 @@ _STATE_RULES: dict[str, tuple[tuple[str, float | None, float | None], ...]] = {
         ("white", 0.18, 0.42),
         ("red", None, 0.03),
         ("dark", None, 0.10),
+        # 白方块填满圆心（真样本全部 1.00）；骑马图标的白是分散的马身
+        # （0.54/0.66），此条把 horse 提示隔离给模板仲裁层。
+        ("center_white", 0.85, None),
     ),
     "fish_hooked": (
         ("green", 0.45, 0.70),

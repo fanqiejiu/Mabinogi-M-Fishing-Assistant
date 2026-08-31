@@ -13,6 +13,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from fishing_assistant.constants import OK_ICON_TEMPLATE_PATHS
 from fishing_assistant.vision.calibration import load_button_templates
 from fishing_assistant.vision.signature import (
     SIGNATURE_STATES,
@@ -52,6 +53,23 @@ class SignatureTemplateTests(unittest.TestCase):
             with self.subTest(template=name):
                 self.assertEqual(state, name)
                 self.assertGreater(confidence, 0.0)
+
+    def test_horse_icons_never_classify_as_states(self) -> None:
+        # 骑马提示图标（绿圆+马+棕色）与 waiting 的颜色占比区间重叠，
+        # 曾以 0.55 信心误判成 waiting——误判会让引擎按 Space 误触上马。
+        # 隔离特征：waiting 的白方块填满圆心（center_white 全部 1.00），
+        # 马身的白是分散的（0.54/0.66）。horse 状态由模板仲裁层负责。
+        for name in ("horse_mount_prompt", "horse_dismount_prompt"):
+            path = OK_ICON_TEMPLATE_PATHS[name]
+            template = cv2.imread(str(path))
+            self.assertIsNotNone(template, f"模板缺失：{path}")
+            height, width = template.shape[:2]
+            features = extract_signature(
+                template, width / 2, height / 2, min(width, height) * 0.9
+            )
+            state, _ = classify_signature(features)
+            with self.subTest(template=name):
+                self.assertEqual(state, "unknown")
 
     def test_blank_image_is_unknown(self) -> None:
         blank = np.full((160, 180, 3), 70, dtype=np.uint8)

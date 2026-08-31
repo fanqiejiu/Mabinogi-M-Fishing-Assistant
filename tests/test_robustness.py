@@ -525,8 +525,9 @@ class ScaleHintTests(unittest.TestCase):
             str(OK_ICON_TEMPLATE_PATHS["waiting_bite"]), cv2.IMREAD_COLOR
         )
         self.assertIsNotNone(frame)
+        # 本测试针对模板扫描路径的尺度 hint 行为；关闭 v2 走 legacy 路径。
         state, _signals = FishingEngine.classify_frame_state(
-            frame, AppConfig(recognition_backend="ok")
+            frame, AppConfig(recognition_backend="ok", v2_vision_enabled=False)
         )
         self.assertEqual(state, IconState.WAITING_BITE)
         self.assertIn("icon_waiting_bite", FishingEngine._scale_hints)

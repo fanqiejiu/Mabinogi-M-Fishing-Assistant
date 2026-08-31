@@ -362,6 +362,10 @@ class FishingEngineTests(unittest.TestCase):
                         signals.recognition_confidence,
                         FishingEngine.COMPASS_PIXEL_MATCH_THRESHOLD,
                     )
+                elif signals.recognition_source == "v2_signature":
+                    # v2 签名层先判的状态：信心是 margin 度量，与模板
+                    # 相似度阈值不同尺度，只要求为正。
+                    self.assertGreater(signals.recognition_confidence, 0.0)
                 else:
                     self.assertEqual(signals.recognition_source, "ok_feature")
                     self.assertGreaterEqual(

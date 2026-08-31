@@ -36,7 +36,9 @@ from .constants import (
     ROD_REQUIRED_TEMPLATE_PATH,
 )
 from .diagnostics import record_error
+from .vision import signature as vision_signature
 from .vision.shadow import ShadowRecorder
+from .vision.stamina import find_stamina_bar_v2
 
 
 class EventKind(str, Enum):
@@ -539,6 +541,15 @@ class FishingEngine:
                     recognition_source="compass_pixel",
                     recognition_confidence=compass_confidence,
                 )
+            if config.v2_vision_enabled:
+                v2_state, v2_confidence = cls._v2_signature_match(bgr)
+                if v2_state is not None:
+                    return v2_state, replace(
+                        signals,
+                        recognition_source="v2_signature",
+                        recognition_confidence=v2_confidence,
+                    )
+            # 签名 unknown（或 v2 关闭）时由 FeatureSet 模板仲裁。
             try:
                 state, best_confidence, _second_confidence = (
                     cls.ok_icon_state_match(bgr)
@@ -581,6 +592,42 @@ class FishingEngine:
         ):
             state = IconState.WAITING_BITE
         return state, signals
+
+    @classmethod
+    def _v2_signature_match(cls, bgr: np.ndarray) -> tuple[IconState | None, float]:
+        """v2 签名快判；无法确定时返回 None 交给模板仲裁层，绝不抛异常。"""
+        try:
+            circle = vision_signature.locate_button_in_roi(bgr)
+            if circle is None:
+                return None, 0.0
+            cx, cy, radius = circle
+            features = vision_signature.extract_signature(bgr, cx, cy, 2 * radius)
+            state, confidence = vision_signature.classify_signature(features)
+            if state == "unknown":
+                return None, 0.0
+            return IconState(state), confidence
+        except Exception:
+            return None, 0.0
+
+    def _find_stamina_bar_v2_sample(
+        self, game_frame: np.ndarray
+    ) -> StaminaBarSample | None:
+        """v2 读条定位结果转引擎采样结构；失败返回 None，绝不抛异常。"""
+        try:
+            bar = find_stamina_bar_v2(
+                game_frame, last_center=self._stamina_last_center
+            )
+        except Exception:
+            return None
+        if bar is None:
+            return None
+        return StaminaBarSample(
+            bar.fill_width,
+            bar.center,
+            bar.anchor_confidence,
+            fill_left=bar.fill_left,
+            fill_height=bar.fill_height,
+        )
 
     @classmethod
     def _load_stamina_anchor_template(cls) -> np.ndarray | None:
@@ -1610,9 +1657,15 @@ class FishingEngine:
                 self._last_stamina_warning_at = now
             return None
         game_frame = frame[:, :, :3]
-        sample = self.find_stamina_bar(game_frame, require_anchor=True)
+        if config.v2_vision_enabled:
+            # v2 路径：降采样粗扫+干净锚点模板，内建就近偏好，
+            # 不需要旧路径的 nearby 降级重试。
+            sample = self._find_stamina_bar_v2_sample(game_frame)
+        else:
+            sample = self.find_stamina_bar(game_frame, require_anchor=True)
         if (
             sample is None
+            and not config.v2_vision_enabled
             and self._stamina_bar_seen
             and self._stamina_last_center is not None
         ):
