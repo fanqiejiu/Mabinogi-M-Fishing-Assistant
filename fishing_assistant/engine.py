@@ -1858,6 +1858,10 @@ class FishingEngine:
                     "指南针像素校正，"
                     f"中心黑点匹配度 {recognition_confidence * 100:.1f}%"
                 )
+            elif recognition_source == "v2_signature":
+                recognition_detail = (
+                    f"v2 颜色签名，判别余裕 {recognition_confidence:.3f}"
+                )
             else:
                 recognition_detail = (
                     "兼容像素，"
