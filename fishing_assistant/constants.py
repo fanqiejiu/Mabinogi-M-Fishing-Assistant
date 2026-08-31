@@ -29,6 +29,11 @@ OK_IDLE_MOTION_TEMPLATE_PATH = resource_path(
 OK_STAMINA_ANCHOR_TEMPLATE_PATH = resource_path(
     "fishing_assistant", "assets", "ok_stamina_fish_anchor.png"
 )
+# 检测 v2 用的读条图标模板：从实战帧重裁的干净版（旧模板带压缩噪点，
+# 同物匹配只有 0.66-0.86，是模式一锚点确认时常失败的根因）。
+ROD_ICON_ANCHOR_LIVE_PATH = resource_path(
+    "fishing_assistant", "assets", "rod_icon_anchor_live.png"
+)
 OK_ICON_TEMPLATE_PATHS = {
     "waiting_bite": resource_path(
         "fishing_assistant", "assets", "ok_icon_waiting_bite.png"
