@@ -177,9 +177,11 @@ class FishingEngine:
         self._horse_mount_frames = 0
         self._horse_dismount_frames = 0
         self._horse_guard_state: IconState | None = None
+        self._horse_dismount_attempted = False
         self._last_horse_dismount_at = 0.0
         self._horse_settle_until = 0.0
         self._ok_window_backend: window_target.OkWindowBackend | None = None
+        self._backend_lock = threading.RLock()
         self._fish_resolution_pending = False
         self._hook_started_at: float | None = None
         self._stamina_peak_width = 0
@@ -310,7 +312,12 @@ class FishingEngine:
             self._startup_probe_active = True
             self._prepare_stamina_view(config)
             if config.capture_mode == "window":
-                target = self._resolve_target_window(config)
+                try:
+                    target = self._resolve_target_window(config)
+                except RuntimeError as error:
+                    self._startup_probe_active = False
+                    self._emit(EventKind.WARNING, f"无法启动后台模式：{error}")
+                    return False
                 self._maintain_background_hover(target, config, force=True)
                 self._emit(
                     EventKind.INFO,
@@ -1190,15 +1197,21 @@ class FishingEngine:
     def _on_key_press(
         self, key: keyboard.Key | keyboard.KeyCode | None
     ) -> bool | None:
-        if key == keyboard.Key.f7:
-            self.calibrate_from_cursor()
-        elif key == keyboard.Key.f8:
-            self.toggle_monitoring()
-        elif key == keyboard.Key.f9:
-            self.save_debug_capture()
-        elif key == keyboard.Key.esc:
-            self.set_monitoring(False)
-            self._emit(EventKind.WARNING, "已触发紧急停止。")
+        # 回调里逃逸的异常会杀死 pynput 监听线程，之后所有快捷键
+        # （包括 Esc 紧急停止）都会静默失效，因此必须整体防护。
+        try:
+            if key == keyboard.Key.f7:
+                self.calibrate_from_cursor()
+            elif key == keyboard.Key.f8:
+                self.toggle_monitoring()
+            elif key == keyboard.Key.f9:
+                self.save_debug_capture()
+            elif key == keyboard.Key.esc:
+                self.set_monitoring(False)
+                self._emit(EventKind.WARNING, "已触发紧急停止。")
+        except Exception as error:
+            record_error("hotkey handler", error)
+            self._emit(EventKind.WARNING, f"快捷键处理出现异常：{error}")
         return None
 
     def _monitor_loop(self) -> None:
@@ -1324,8 +1337,11 @@ class FishingEngine:
                             f"已用完 {retry_limit} 次自动重试：{error}",
                         )
                         consecutive_failures = 0
-                time.sleep(config.poll_interval_ms / 1000)
+                # 配置文件可能被手改成非法值；负数会让 sleep 抛异常杀死本线程。
+                time.sleep(max(0, config.poll_interval_ms) / 1000)
         except Exception as error:  # pragma: no cover - mss 初始化失败
+            # 线程即将退出；必须同步清掉监测标志，避免界面停留在“监测中”假状态。
+            self._enabled.clear()
             self._emit(EventKind.ERROR, f"无法启动识别服务：{error}")
         finally:
             if screen is not None:
@@ -1520,16 +1536,20 @@ class FishingEngine:
     def _get_ok_window_backend(
         self, target: window_target.WindowInfo
     ) -> window_target.OkWindowBackend:
-        if self._ok_window_backend is None or self._ok_window_backend.handle != target.handle:
-            self._close_ok_window_backend()
-            self._ok_window_backend = window_target.OkWindowBackend(target)
-        self._ok_window_backend.update(target)
-        return self._ok_window_backend
+        # 监测线程与快捷键线程（F9 快照）可能同时到达；不加锁会建出
+        # 两个 WGC 会话，其中一个失去引用后不会被关闭。
+        with self._backend_lock:
+            if self._ok_window_backend is None or self._ok_window_backend.handle != target.handle:
+                self._close_ok_window_backend()
+                self._ok_window_backend = window_target.OkWindowBackend(target)
+            self._ok_window_backend.update(target)
+            return self._ok_window_backend
 
     def _close_ok_window_backend(self) -> None:
-        if self._ok_window_backend is not None:
-            self._ok_window_backend.close()
-            self._ok_window_backend = None
+        with self._backend_lock:
+            if self._ok_window_backend is not None:
+                self._ok_window_backend.close()
+                self._ok_window_backend = None
 
     def _process_frame(
         self,
@@ -1672,7 +1692,13 @@ class FishingEngine:
                 self._schedule_recast(now, config, "收鱼完成")
         elif self._fish_resolution_pending:
             strategy = self._catch_strategy(config)
-            if strategy == "stamina_bounce":
+            if strategy == "instant" and fish_visible:
+                # 上钩等待期间被切换成模式 3：立即收杆，而不是楔在
+                # 只认识模式 1 / 模式 2 的分支里直到本轮目标消失。
+                self._collect_fish(
+                    now, config, "收鱼策略已切换为模式 3，检测到上钩立即收杆。"
+                )
+            elif strategy == "stamina_bounce":
                 if stamina_sample is not None:
                     # 绿条和中鱼锚点比右下角图标更直接；命中时清掉图标漏识别帧。
                     self._clear_frames = 0
@@ -2205,8 +2231,13 @@ class FishingEngine:
             if self._horse_dismount_frames < 2:
                 return True
             self._cancel_pending_recast()
-            if now - self._last_horse_dismount_at >= 2.0:
+            # 同一段持续显示的下马提示只按一次；提示消失又出现才允许重试。
+            if (
+                not self._horse_dismount_attempted
+                and now - self._last_horse_dismount_at >= 2.0
+            ):
                 self._press_key("space", config)
+                self._horse_dismount_attempted = True
                 self._last_horse_dismount_at = now
                 self._horse_settle_until = now + 1.5
                 self._emit(EventKind.SUCCESS, "检测到下马图标，已按一次 Space 下马，等待钓鱼图标恢复。")
@@ -2216,6 +2247,7 @@ class FishingEngine:
         self._horse_mount_frames = 0
         self._horse_dismount_frames = 0
         self._horse_guard_state = None
+        self._horse_dismount_attempted = False
         return False
 
     def _should_scan_blocking_messages(self) -> bool:
@@ -2325,6 +2357,12 @@ class FishingEngine:
     ) -> None:
         if self._pending_recast_at is None:
             return
+        if not config.auto_resume_fishing:
+            # 等待续钓期间用户关掉了自动续钓：撤销待发按键。
+            self._pending_recast_at = None
+            self._pending_recast_reason = ""
+            self._refresh_hover_before_recast = False
+            return
         if icon_state != IconState.READY_TO_CAST:
             return
         if self._refresh_hover_before_recast:
@@ -2345,8 +2383,18 @@ class FishingEngine:
         """识别到指南针时短按 W 再 S，刷新开始钓鱼图标。"""
         self._last_recovery_at = time.monotonic()
         self._idle_frames = 0
+        was_enabled = self._enabled.is_set()
         self._tap_key("w", config.recovery_key_hold_ms, config)
         time.sleep(config.recovery_pause_ms / 1000)
+        if was_enabled and (
+            not self._enabled.is_set() or self._shutdown.is_set()
+        ):
+            # Esc / 暂停必须是可靠的送键取消边界：W 之后的停顿期间
+            # 被停止时，不再补送 S（焦点可能已切到其他程序）。
+            self._emit(
+                EventKind.WARNING, "恢复序列已被停止中断，未发送后续按键。"
+            )
+            return
         self._tap_key("s", config.recovery_key_hold_ms, config)
         if config.capture_mode == "window" and config.auto_resume_fishing:
             self._refresh_hover_before_recast = True
@@ -2474,6 +2522,7 @@ class FishingEngine:
         self._horse_mount_frames = 0
         self._horse_dismount_frames = 0
         self._horse_guard_state = None
+        self._horse_dismount_attempted = False
         self._horse_settle_until = 0.0
         self._fish_resolution_pending = False
         self._last_logged_icon_state = None

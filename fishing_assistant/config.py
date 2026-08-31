@@ -140,6 +140,17 @@ def default_config() -> AppConfig:
     return AppConfig()
 
 
+def _coerce_point(value: object) -> tuple[int, int] | None:
+    """坐标字段只接受两个数字组成的序列；其余结构一律视为未校准。"""
+    if (
+        isinstance(value, (list, tuple))
+        and len(value) == 2
+        and all(isinstance(item, (int, float)) for item in value)
+    ):
+        return int(value[0]), int(value[1])
+    return None
+
+
 def load_config() -> AppConfig:
     if not CONFIG_PATH.exists():
         return default_config()
@@ -147,7 +158,16 @@ def load_config() -> AppConfig:
         raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return default_config()
+    if not isinstance(raw, dict):
+        return default_config()
+    try:
+        return _config_from_raw(raw)
+    except (AttributeError, KeyError, TypeError, ValueError):
+        # 语法正确但结构损坏的配置不应让应用无法启动。
+        return default_config()
 
+
+def _config_from_raw(raw: dict) -> AppConfig:
     # v2 的 90 px 单阈值会把新版的抛竿图标误判成鱼，升级时弃用它。
     if int(raw.get("schema_version", 0)) < 3:
         raw.pop("red_pixel_threshold", None)
@@ -193,20 +213,17 @@ def load_config() -> AppConfig:
         raw["fallback_collect_delay_seconds"] = 5.3
     if raw.get("recognition_backend") not in {"ok", "pixel"}:
         raw["recognition_backend"] = "ok"
-    # 不受旧配置影响，更新源始终固定在项目自身仓库并默认启用启动检查。
+    # 更新源始终固定在项目自身仓库；是否启动时检查由用户设置决定。
     raw["github_repository"] = GITHUB_REPOSITORY
-    raw["github_auto_check"] = True
+    raw["github_auto_check"] = bool(raw.get("github_auto_check", True))
 
     valid_names = {field.name for field in fields(AppConfig)}
     values = {name: value for name, value in raw.items() if name in valid_names}
-    if values.get("button_center") is not None:
-        values["button_center"] = tuple(values["button_center"])
-    if values.get("target_button_offset") is not None:
-        values["target_button_offset"] = tuple(values["target_button_offset"])
-    try:
-        return AppConfig(**values)
-    except TypeError:
-        return default_config()
+    values["button_center"] = _coerce_point(values.get("button_center"))
+    values["target_button_offset"] = _coerce_point(
+        values.get("target_button_offset")
+    )
+    return AppConfig(**values)
 
 
 def save_config(config: AppConfig) -> None:
