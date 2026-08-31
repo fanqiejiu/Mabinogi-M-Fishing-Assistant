@@ -101,7 +101,6 @@ class AppConfig:
     recovery_key_hold_ms: int = 180
     recovery_pause_ms: int = 120
     recovery_cooldown_ms: int = 4500
-    recast_delay_ms: int = 650
     # stamina_bounce：体力槽中点灰→绿时收鱼；fixed_delay：按自定义秒数收鱼；instant：上钩即收。
     catch_strategy: str = "stamina_bounce"
     fallback_collect_delay_seconds: float = 5.3
@@ -116,7 +115,7 @@ class AppConfig:
     target_window_handle: int = 0
     target_window_title: str = ""
     target_button_offset: tuple[int, int] | None = None
-    # 更新源固定为项目仓库，并在每次启动后自动检查 Latest Release。
+    # 更新源固定为项目仓库；是否在启动时自动检查由用户设置决定。
     github_repository: str = GITHUB_REPOSITORY
     github_auto_check: bool = True
 

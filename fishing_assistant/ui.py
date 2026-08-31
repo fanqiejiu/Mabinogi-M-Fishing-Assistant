@@ -1006,7 +1006,7 @@ class MainWindow(QMainWindow):
         update_layout.addLayout(
             self._card_heading(
                 "GitHub 更新检查",
-                "更新源固定为本项目仓库；每次启动后自动检查 Latest Release。",
+                "更新源固定为本项目仓库；可选择是否在启动时自动检查。",
             )
         )
         update_grid = QGridLayout()
@@ -1021,9 +1021,8 @@ class MainWindow(QMainWindow):
         self.github_repo_link.setToolTip("在浏览器中打开项目主页")
         update_grid.addWidget(self.github_repo_link, 1, 0)
         update_layout.addLayout(update_grid)
-        self.github_auto_check = QCheckBox("启动时自动检查更新（已启用）")
+        self.github_auto_check = QCheckBox("启动时自动检查更新")
         self.github_auto_check.setChecked(True)
-        self.github_auto_check.setEnabled(False)
         update_layout.addWidget(self.github_auto_check)
         update_actions = QHBoxLayout()
         self.check_update_button = QPushButton("手动检查更新")
@@ -1359,7 +1358,7 @@ class MainWindow(QMainWindow):
         self.idle_max_spin.setValue(config.idle_red_pixel_max)
         self.recovery_hold_spin.setValue(config.recovery_key_hold_ms)
         self.recovery_cooldown_spin.setValue(config.recovery_cooldown_ms)
-        self.github_auto_check.setChecked(True)
+        self.github_auto_check.setChecked(config.github_auto_check)
         del blockers
         self._sync_target_mode_controls()
         self._sync_auto_roi_controls()
@@ -1428,6 +1427,9 @@ class MainWindow(QMainWindow):
         self.restore_button.clicked.connect(self._restore_recommended_settings)
 
         self.check_update_button.clicked.connect(lambda: self._check_for_updates(manual=True))
+        self.github_auto_check.toggled.connect(
+            lambda checked: self.engine.update_config(github_auto_check=checked)
+        )
         self.open_release_button.clicked.connect(self._open_release_page)
         self.create_bundle_button.clicked.connect(self._create_diagnostic_bundle)
         self.open_log_button.clicked.connect(self._open_log_directory)
@@ -1558,7 +1560,6 @@ class MainWindow(QMainWindow):
             recovery_key_hold_ms=defaults.recovery_key_hold_ms,
             recovery_pause_ms=defaults.recovery_pause_ms,
             recovery_cooldown_ms=defaults.recovery_cooldown_ms,
-            recast_delay_ms=defaults.recast_delay_ms,
             catch_strategy=defaults.catch_strategy,
             fallback_collect_delay_seconds=defaults.fallback_collect_delay_seconds,
             stamina_scan_interval_ms=defaults.stamina_scan_interval_ms,
@@ -1568,13 +1569,14 @@ class MainWindow(QMainWindow):
         self._append_log("已恢复推荐识别参数。", EventKind.INFO)
 
     def begin_startup_services(self) -> None:
-        """启动页结束后读取一次硬件，并自动检查固定的项目 Release。"""
+        """启动页结束后读取一次硬件；按用户设置决定是否检查 Release。"""
         threading.Thread(
             target=self._collect_system_profile_async,
             name="system-profile",
             daemon=True,
         ).start()
-        self._check_for_updates(manual=False)
+        if self.engine.config().github_auto_check:
+            self._check_for_updates(manual=False)
 
     def _collect_system_profile_async(self) -> None:
         try:
@@ -1596,10 +1598,8 @@ class MainWindow(QMainWindow):
         self._append_log("已读取一次本机硬件信息（不持续监测）。", EventKind.INFO)
 
     def _save_update_preferences(self) -> None:
-        self.engine.update_config(
-            github_repository=GITHUB_REPOSITORY,
-            github_auto_check=True,
-        )
+        # 仅固定更新源仓库；是否启动检查由用户的复选框决定。
+        self.engine.update_config(github_repository=GITHUB_REPOSITORY)
 
     def _check_for_updates(self, *, manual: bool) -> None:
         self._save_update_preferences()
