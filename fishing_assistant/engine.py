@@ -204,7 +204,6 @@ class FishingEngine:
         self._fish_resolution_pending = False
         self._hook_started_at: float | None = None
         self._stamina_peak_width = 0
-        self._stamina_trough_width = 0
         self._stamina_last_width = 0
         self._stamina_low_seen = False
         self._stamina_rebound_started = False
@@ -2213,10 +2212,8 @@ class FishingEngine:
         previous_peak = self._stamina_peak_width
         if previous_peak == 0:
             self._stamina_peak_width = width
-            self._stamina_trough_width = width
         else:
             self._stamina_peak_width = max(previous_peak, width)
-            self._stamina_trough_width = min(self._stamina_trough_width, width)
         self._stamina_last_width = width
 
         if observed_at - self._last_stamina_observation_log_at >= 0.9:
@@ -2326,7 +2323,6 @@ class FishingEngine:
     def _reset_stamina_tracking(self) -> None:
         self._hook_started_at = None
         self._stamina_peak_width = 0
-        self._stamina_trough_width = 0
         self._stamina_last_width = 0
         self._stamina_low_seen = False
         self._stamina_rebound_started = False

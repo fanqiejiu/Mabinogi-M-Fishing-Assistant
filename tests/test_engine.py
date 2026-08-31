@@ -229,7 +229,6 @@ class FishingEngineTests(unittest.TestCase):
         config = AppConfig(
             button_center=(1700, 900),
             catch_strategy="instant",
-            recast_delay_ms=10000,
         )
         engine = FishingEngine()
         engine._config = config  # type: ignore[attr-defined]
@@ -474,7 +473,6 @@ class FishingEngineTests(unittest.TestCase):
             trigger_consecutive_frames=1,
             clear_consecutive_frames=1,
             press_cooldown_ms=0,
-            recast_delay_ms=0,
         )
         engine = FishingEngine()
         with patch("fishing_assistant.engine.pyautogui.press") as press:
@@ -501,7 +499,6 @@ class FishingEngineTests(unittest.TestCase):
             trigger_consecutive_frames=1,
             clear_consecutive_frames=1,
             press_cooldown_ms=0,
-            recast_delay_ms=0,
         )
         engine = FishingEngine()
         with patch(
@@ -1024,7 +1021,6 @@ class FishingEngineTests(unittest.TestCase):
             recovery_cooldown_ms=0,
             recovery_pause_ms=0,
             press_cooldown_ms=0,
-            recast_delay_ms=650,
         )
         engine = FishingEngine()
         with patch.object(engine, "_tap_key") as tap_key, patch(

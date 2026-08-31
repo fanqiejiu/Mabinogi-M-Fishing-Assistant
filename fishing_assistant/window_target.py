@@ -25,7 +25,6 @@ WM_KEYDOWN = 0x0100
 WM_KEYUP = 0x0101
 WM_ACTIVATE = 0x0006
 WM_MOUSEMOVE = 0x0200
-WM_MOUSEWHEEL = 0x020A
 WA_ACTIVE = 1
 SW_RESTORE = 9
 PW_RENDERFULLCONTENT = 0x00000002
@@ -436,29 +435,6 @@ def activate_window(handle: int) -> WindowInfo:
     if not _user32.SetForegroundWindow(hwnd):
         raise RuntimeError("Windows 未允许切换目标窗口到前台。")
     return info
-
-
-def post_mouse_wheel(handle: int, steps: int) -> None:
-    """向目标窗口投递向上/向下滚轮消息，不影响当前前台窗口。"""
-    _require_windows()
-    info = get_window_info(handle)
-    if info is None:
-        raise RuntimeError("目标窗口已关闭或不可见，未发送滚轮消息。")
-    if steps == 0:
-        return
-    hwnd = wintypes.HWND(info.handle)
-    if not _user32.PostMessageW(hwnd, WM_ACTIVATE, WA_ACTIVE, 0):
-        raise ctypes.WinError(ctypes.get_last_error())
-    direction = 1 if steps > 0 else -1
-    wheel_wparam = ((direction * 120) & 0xFFFF) << 16
-    # WM_MOUSEWHEEL 的 lParam 使用屏幕坐标；投到窗口中心可兼容会检查鼠标位置的客户端。
-    center_x = info.left + info.width // 2
-    center_y = info.top + info.height // 2
-    wheel_lparam = ((center_y & 0xFFFF) << 16) | (center_x & 0xFFFF)
-    for _ in range(abs(steps)):
-        if not _user32.PostMessageW(hwnd, WM_MOUSEWHEEL, wheel_wparam, wheel_lparam):
-            raise ctypes.WinError(ctypes.get_last_error())
-        time.sleep(0.04)
 
 
 def post_mouse_move(handle: int, center_offset: tuple[int, int]) -> None:
