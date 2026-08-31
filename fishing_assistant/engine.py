@@ -19,6 +19,7 @@ from ok.feature.FeatureSet import FeatureSet
 from . import window_target
 
 from .config import (
+    APP_DIR,
     DEBUG_IMAGE_PATH,
     AppConfig,
     effective_roi_size,
@@ -35,6 +36,7 @@ from .constants import (
     ROD_REQUIRED_TEMPLATE_PATH,
 )
 from .diagnostics import record_error
+from .vision.shadow import ShadowRecorder
 
 
 class EventKind(str, Enum):
@@ -206,6 +208,8 @@ class FishingEngine:
         self._horse_settle_until = 0.0
         self._ok_window_backend: window_target.OkWindowBackend | None = None
         self._backend_lock = threading.RLock()
+        self._shadow_recorder: ShadowRecorder | None = None
+        self._shadow_prev_icon: IconState | None = None
         self._fish_resolution_pending = False
         self._hook_started_at: float | None = None
         self._stamina_peak_width = 0
@@ -266,6 +270,8 @@ class FishingEngine:
         if self._thread is not None:
             self._thread.join(timeout=1.5)
         self._close_ok_window_backend()
+        if self._shadow_recorder is not None:
+            self._shadow_recorder.close()
 
     def config(self) -> AppConfig:
         with self._config_lock:
@@ -1402,6 +1408,10 @@ class FishingEngine:
                     frame = self._capture_frame(screen, config)
                     icon_state, signals = self.classify_frame_state(frame[:, :, :3], config)
                     loop_now = time.monotonic()
+                    if config.v2_shadow_enabled:
+                        self._shadow_observe(
+                            frame[:, :, :3], icon_state, signals, screen, config
+                        )
                     strategy = self._catch_strategy(config)
                     stamina_sample = None
                     escape_message_confidence = 0.0
@@ -1539,6 +1549,31 @@ class FishingEngine:
         if screen is None:
             raise RuntimeError("屏幕截图服务未初始化。")
         return np.asarray(screen.grab(self._capture_region(config)))
+
+    def _shadow_observe(
+        self,
+        roi_bgr: np.ndarray,
+        icon_state: IconState,
+        signals: IconColorSignals,
+        screen: mss.MSS | None,
+        config: AppConfig,
+    ) -> None:
+        """影子模式旁路：v2 链并行判定 + 上钩瞬间全帧采集，绝不抛异常。"""
+        try:
+            if self._shadow_recorder is None:
+                self._shadow_recorder = ShadowRecorder(APP_DIR / "v2_shadow")
+            self._shadow_recorder.record_icon(
+                roi_bgr, icon_state.value, signals.recognition_confidence
+            )
+            if (
+                icon_state == IconState.FISH_HOOKED
+                and self._shadow_prev_icon != IconState.FISH_HOOKED
+            ):
+                full = self._capture_stamina_frame(screen, config)
+                self._shadow_recorder.record_hook_transition(full[:, :, :3])
+            self._shadow_prev_icon = icon_state
+        except Exception:
+            pass
 
     def _capture_stamina_frame(
         self, screen: mss.MSS | None, config: AppConfig

@@ -119,6 +119,8 @@ class AppConfig:
     # 更新源固定为项目仓库；是否在启动时自动检查由用户设置决定。
     github_repository: str = GITHUB_REPOSITORY
     github_auto_check: bool = True
+    # 检测 v2 影子模式：并行运行新识别链并记录对照，不参与决策。
+    v2_shadow_enabled: bool = False
 
     def copy(self, **changes: object) -> "AppConfig":
         return replace(self, **changes)
