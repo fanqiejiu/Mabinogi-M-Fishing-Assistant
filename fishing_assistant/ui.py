@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
     QDoubleSpinBox,
     QFrame,
     QGridLayout,
@@ -48,7 +49,7 @@ from .constants import (
     GITHUB_REPOSITORY,
 )
 from .diagnostics import LOG_DIR, create_support_bundle, record_error, set_system_profile
-from .engine import EngineEvent, EventKind, FishingEngine
+from .engine import EngineEvent, EventKind, FishingEngine, IconState
 from .system_profile import SystemProfile, collect_system_profile
 from .updates import UpdateResult, check_github_release
 
@@ -96,6 +97,16 @@ QLabel#statusChip {
 }
 QLabel#statusChip[state="running"] { background: #123629; border-color: #1F7556; color: #80E7BF; }
 QLabel#statusChip[state="warning"] { background: #3A2C14; border-color: #82631F; color: #F6CF6A; }
+QLabel#runtimeStateChip {
+    background: #0D192A; border: 1px solid #29415E; border-radius: 10px;
+    color: #AFC3DA; padding: 9px 12px; font-size: 12px; font-weight: 700;
+}
+QLabel#runtimeStateChip[state="running"] { background: #102A31; border-color: #2DB88B; color: #75E4BE; }
+QLabel#runtimeStateChip[state="warning"] { background: #3A2C14; border-color: #82631F; color: #F6CF6A; }
+QFrame#timingCallout { background: #0A1626; border: 1px solid #29415E; border-radius: 9px; }
+QLabel#timingTitle { color: #75E4BE; font-size: 13px; font-weight: 800; }
+QLabel#updateDialogTitle { color: #F8FBFF; font-size: 19px; font-weight: 800; }
+QLabel#updateDialogVersion { color: #75E4BE; font-size: 14px; font-weight: 700; }
 QPushButton#navButton {
     border: 0; border-radius: 10px; color: #8EA2BD; text-align: left;
     padding: 11px 14px; font-size: 13px; font-weight: 600;
@@ -130,8 +141,10 @@ QProgressBar { background: #0A1525; border: 0; border-radius: 5px; min-height: 9
 QProgressBar::chunk { background: #21BC8A; border-radius: 5px; }
 QPlainTextEdit { background: #0A1423; border: 1px solid #233650; border-radius: 10px; padding: 10px; color: #AFC4DC; font-family: 'Cascadia Mono'; font-size: 11px; }
 QScrollArea, QWidget#pageCanvas { border: 0; background: #09111F; }
-QScrollBar:vertical { background: transparent; width: 9px; margin: 4px; }
-QScrollBar::handle:vertical { background: #2A3C55; border-radius: 4px; min-height: 28px; }
+QScrollBar:vertical { background: #0C1727; width: 11px; margin: 4px 2px; border-radius: 5px; }
+QScrollBar::handle:vertical { background: #3A526F; border-radius: 4px; min-height: 34px; }
+QScrollBar::handle:vertical:hover { background: #567394; }
+QScrollBar::handle:vertical:pressed { background: #6B8BAD; }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
 QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
 """
@@ -158,6 +171,13 @@ QLabel#pageTitle, QLabel#cardTitle, QLabel#metricValue, QLabel#brandTitle { colo
 QLabel#statusChip { background: #EDF2F7; border-color: #D3DFEC; color: #556B85; }
 QLabel#statusChip[state="running"] { background: #E0F7EE; border-color: #8DDBC0; color: #187352; }
 QLabel#statusChip[state="warning"] { background: #FFF5D8; border-color: #EDD38B; color: #86620B; }
+QLabel#runtimeStateChip { background: #F4F8FC; border-color: #C9D8E8; color: #536B85; }
+QLabel#runtimeStateChip[state="running"] { background: #E0F7EE; border-color: #8DDBC0; color: #187352; }
+QLabel#runtimeStateChip[state="warning"] { background: #FFF5D8; border-color: #EDD38B; color: #86620B; }
+QFrame#timingCallout { background: #F4F9FC; border-color: #C9D8E8; }
+QLabel#timingTitle { color: #16835F; }
+QLabel#updateDialogTitle { color: #14233A; }
+QLabel#updateDialogVersion { color: #16835F; }
 QPushButton#navButton { color: #60758E; }
 QPushButton#navButton:hover { background: #EDF3F8; color: #172C48; }
 QPushButton#navButton:checked { background: #DDF5EA; color: #107450; }
@@ -172,7 +192,10 @@ QComboBox QAbstractItemView { background: #FFFFFF; border-color: #C8D7E6; select
 QSlider::groove:horizontal { background: #D7E3EF; }
 QSlider::handle:horizontal { background: #158D68; }
 QPlainTextEdit { background: #F8FBFE; border-color: #D4E0EC; color: #425C79; }
-QScrollBar::handle:vertical { background: #B6C9DA; }
+QScrollBar:vertical { background: #E4ECF4; }
+QScrollBar::handle:vertical { background: #A7BDCF; }
+QScrollBar::handle:vertical:hover { background: #819EB8; }
+QScrollBar::handle:vertical:pressed { background: #6688A6; }
 QProgressBar { background: #DCE8F3; }
 QProgressBar::chunk { background: #20A977; }
 QCheckBox { color: #29415D; }
@@ -216,6 +239,69 @@ class ScrollSafeDoubleSpinBox(QDoubleSpinBox):
         event.ignore()
 
 
+class ScrollSafeComboBox(QComboBox):
+    """下拉列表关闭时把滚轮交给页面，避免经过选项框时误切换。"""
+
+    def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802
+        if self.view().isVisible():
+            super().wheelEvent(event)
+        else:
+            event.ignore()
+
+
+class ScrollSafeSlider(QSlider):
+    """滑条仅响应拖动和键盘，不拦截页面滚动。"""
+
+    def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802
+        event.ignore()
+
+
+class UpdateAvailableDialog(QDialog):
+    """不遮挡主界面的紧凑更新提醒。"""
+
+    def __init__(self, result: UpdateResult, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._release_url = result.release_url
+        self.setWindowTitle("发现新版本")
+        self.setModal(False)
+        self.setMinimumWidth(380)
+        self.setMaximumWidth(430)
+        self.setSizeGripEnabled(False)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 20, 22, 18)
+        layout.setSpacing(10)
+
+        title = QLabel("发现新版本")
+        title.setObjectName("updateDialogTitle")
+        layout.addWidget(title)
+        latest = result.latest_version or "新版本"
+        version = QLabel(f"当前 v{APP_VERSION}  →  {latest}")
+        version.setObjectName("updateDialogVersion")
+        layout.addWidget(version)
+        message = QLabel("新版本已经发布，可以前往 GitHub 查看更新内容并下载。")
+        message.setObjectName("cardHint")
+        message.setWordWrap(True)
+        layout.addWidget(message)
+
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        later_button = QPushButton("稍后")
+        later_button.clicked.connect(self.close)
+        actions.addWidget(later_button)
+        release_button = QPushButton("查看更新")
+        release_button.setObjectName("primaryButton")
+        release_button.setEnabled(bool(self._release_url))
+        release_button.clicked.connect(self._open_release)
+        actions.addWidget(release_button)
+        layout.addLayout(actions)
+
+    def _open_release(self) -> None:
+        if self._release_url:
+            QDesktopServices.openUrl(QUrl(self._release_url))
+        self.close()
+
+
 class MainWindow(QMainWindow):
     """配置中心、运行状态与操作日志组成的单窗口桌面应用。"""
 
@@ -240,6 +326,8 @@ class MainWindow(QMainWindow):
         self.update_ready.connect(self._show_update_result)
         self._navigation: list[QPushButton] = []
         self._last_release_url: str | None = None
+        self._notified_release_version: str | None = None
+        self._update_dialog: UpdateAvailableDialog | None = None
         self._auto_detected_game_window: window_target.WindowInfo | None = None
 
         self.setWindowTitle(APP_NAME)
@@ -367,6 +455,12 @@ class MainWindow(QMainWindow):
         heading.setSpacing(4)
         layout.addLayout(heading)
         layout.addStretch(1)
+        self.runtime_state_chip = QLabel("状态 · 等待校准")
+        self.runtime_state_chip.setObjectName("runtimeStateChip")
+        self.runtime_state_chip.setProperty("state", "idle")
+        self.runtime_state_chip.setMinimumWidth(132)
+        self.runtime_state_chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.runtime_state_chip, 0, Qt.AlignmentFlag.AlignTop)
         self.theme_button = QPushButton()
         self.theme_button.setToolTip("切换日间 / 夜间界面")
         layout.addWidget(self.theme_button, 0, Qt.AlignmentFlag.AlignTop)
@@ -382,6 +476,9 @@ class MainWindow(QMainWindow):
         scroll.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
+        scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOn
+        )
         canvas = QWidget()
         canvas.setObjectName("pageCanvas")
         layout = QVBoxLayout(canvas)
@@ -391,7 +488,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._build_profile_card())
         layout.addWidget(self._build_runtime_card())
         layout.addWidget(self._build_log_card(), 1)
-        layout.addWidget(self._build_hardware_card())
+
         scroll.setWidget(canvas)
         return scroll
 
@@ -405,12 +502,12 @@ class MainWindow(QMainWindow):
         form = QGridLayout()
         form.setHorizontalSpacing(18)
         form.setVerticalSpacing(14)
-        self.monitor_combo = QComboBox()
-        self.mode_combo = QComboBox()
+        self.monitor_combo = ScrollSafeComboBox()
+        self.mode_combo = ScrollSafeComboBox()
         self.mode_combo.addItem("无边框全屏（推荐）", "borderless")
         self.mode_combo.addItem("独占全屏", "fullscreen")
         self.mode_combo.addItem("窗口模式", "windowed")
-        self.resolution_combo = QComboBox()
+        self.resolution_combo = ScrollSafeComboBox()
         form.addWidget(self._form_label("目标显示器", "选择游戏所在的屏幕"), 0, 0)
         form.addWidget(self.monitor_combo, 1, 0)
         form.addWidget(self._form_label("画面模式", "用于保存当前游戏配置"), 0, 1)
@@ -431,13 +528,13 @@ class MainWindow(QMainWindow):
         target = QGridLayout()
         target.setHorizontalSpacing(18)
         target.setVerticalSpacing(10)
-        self.target_mode_combo = QComboBox()
+        self.target_mode_combo = ScrollSafeComboBox()
         self.target_mode_combo.addItem("屏幕坐标模式（稳定）", "screen")
         self.target_mode_combo.addItem("指定窗口后台模式（实验性）", "window")
-        self.window_backend_combo = QComboBox()
+        self.window_backend_combo = ScrollSafeComboBox()
         self.window_backend_combo.addItem("OK 后台引擎（WGC + PostMessage）", "ok")
         self.window_backend_combo.addItem("兼容引擎（PrintWindow）", "printwindow")
-        self.target_window_combo = QComboBox()
+        self.target_window_combo = ScrollSafeComboBox()
         self.refresh_windows_button = QPushButton("刷新窗口")
         target_window_row = QWidget()
         target_window_layout = QHBoxLayout(target_window_row)
@@ -528,7 +625,7 @@ class MainWindow(QMainWindow):
         metrics.addWidget(self.red_metric, 0, 0)
         metrics.addWidget(self.stamina_metric, 0, 1)
         layout.addLayout(metrics)
-        self.red_progress = QSlider(Qt.Orientation.Horizontal)
+        self.red_progress = ScrollSafeSlider(Qt.Orientation.Horizontal)
         self.red_progress.setEnabled(False)
         self.red_progress.setMinimum(0)
         self.red_progress.setMaximum(1200)
@@ -612,6 +709,9 @@ class MainWindow(QMainWindow):
         scroll.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
+        scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOn
+        )
         canvas = QWidget()
         canvas.setObjectName("pageCanvas")
         layout = QVBoxLayout(canvas)
@@ -632,13 +732,13 @@ class MainWindow(QMainWindow):
         catch_grid = QGridLayout()
         catch_grid.setHorizontalSpacing(16)
         catch_grid.setVerticalSpacing(10)
-        self.catch_strategy_combo = QComboBox()
+        self.catch_strategy_combo = ScrollSafeComboBox()
         self.catch_strategy_combo.addItem(
-            "模式 1：体力条反弹（实验性功能，不稳定）",
+            "模式 1：体力条反弹",
             "stamina_bounce",
         )
         self.catch_strategy_combo.addItem(
-            "模式 2：定时收鱼（支持小数秒）", "fixed_delay"
+            "模式 2：定时收鱼（推荐）", "fixed_delay"
         )
         self.catch_strategy_combo.addItem(
             "模式 3：上钩立即收杆", "instant"
@@ -669,7 +769,16 @@ class MainWindow(QMainWindow):
             "启动模式 1 时会向上滚轮放大游戏画面；0 表示不自动滚动。",
             self.stamina_zoom_spin,
         )
-        mode_one_panel.layout().addWidget(self.learned_escape_label)
+        timing_panel = QFrame()
+        timing_panel.setObjectName("timingCallout")
+        timing_layout = QVBoxLayout(timing_panel)
+        timing_layout.setContentsMargins(12, 10, 12, 10)
+        timing_layout.setSpacing(4)
+        timing_title = QLabel("钓鱼计时")
+        timing_title.setObjectName("timingTitle")
+        timing_layout.addWidget(timing_title)
+        timing_layout.addWidget(self.learned_escape_label)
+        mode_one_panel.layout().addWidget(timing_panel)
 
         self.catch_option_stack = QStackedWidget()
         self.catch_option_stack.addWidget(mode_one_panel)
@@ -765,6 +874,9 @@ class MainWindow(QMainWindow):
         scroll.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
+        scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOn
+        )
         canvas = QWidget()
         canvas.setObjectName("pageCanvas")
         layout = QVBoxLayout(canvas)
@@ -781,7 +893,7 @@ class MainWindow(QMainWindow):
                 "默认使用 OK 框架；旧像素模式作为用户手动选择的兼容方案。",
             )
         )
-        self.recognition_backend_combo = QComboBox()
+        self.recognition_backend_combo = ScrollSafeComboBox()
         self.recognition_backend_combo.addItem(
             "OK 框架特征识别（推荐）", "ok"
         )
@@ -802,7 +914,7 @@ class MainWindow(QMainWindow):
 
         self.threshold_value = QLabel("1200 px")
         self.threshold_value.setObjectName("metricValue")
-        self.threshold_slider = QSlider(Qt.Orientation.Horizontal)
+        self.threshold_slider = ScrollSafeSlider(Qt.Orientation.Horizontal)
         self.threshold_slider.setRange(400, 3000)
         threshold_header = QHBoxLayout()
         self.threshold_header_label = self._form_label(
@@ -839,7 +951,7 @@ class MainWindow(QMainWindow):
         grid.setVerticalSpacing(12)
         self.roi_width_spin = self._spin_box(100, 640, 160, " px")
         self.roi_height_spin = self._spin_box(100, 720, 180, " px")
-        self.interval_combo = QComboBox()
+        self.interval_combo = ScrollSafeComboBox()
         for value in (50, 75, 100, 125, 150):
             self.interval_combo.addItem(f"{value} ms", value)
         self.trigger_spin = self._spin_box(1, 5, 2, " 帧")
@@ -923,6 +1035,9 @@ class MainWindow(QMainWindow):
         scroll.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
+        scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOn
+        )
         canvas = QWidget()
         canvas.setObjectName("pageCanvas")
         layout = QVBoxLayout(canvas)
@@ -974,6 +1089,9 @@ class MainWindow(QMainWindow):
         scroll.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
+        scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOn
+        )
         canvas = QWidget()
         canvas.setObjectName("pageCanvas")
         layout = QVBoxLayout(canvas)
@@ -998,6 +1116,7 @@ class MainWindow(QMainWindow):
         ok_credit.setWordWrap(True)
         identity_layout.addWidget(ok_credit)
         layout.addWidget(identity)
+        layout.addWidget(self._build_hardware_card())
 
         update_card = Card()
         update_layout = QVBoxLayout(update_card)
@@ -1450,8 +1569,8 @@ class MainWindow(QMainWindow):
         self.catch_option_stack.setCurrentIndex(stack_index)
         delay = float(self.fallback_delay_spin.value())
         hints = {
-            "stamina_bounce": "模式 1（实验性功能，不稳定）：先用 OK 特征确认中鱼图标并定位体力槽，再观察半条位置的小块颜色。连续变灰后不会收杆；只有再次连续恢复绿色才确认反弹。若识别失败后出现跑鱼提示，会学习本轮耗时并在下一轮提前 1–2 秒兜底。",
-            "fixed_delay": f"模式 2：不分析体力条，上钩后等待 {delay:.1f} 秒收鱼。支持 0.1 秒微调，适合体力条无法稳定识别的场景。",
+            "stamina_bounce": "模式 1：先用 OK 特征确认中鱼图标并定位体力槽，再观察半条位置的小块颜色。连续变灰后不会收杆；只有再次连续恢复绿色才确认反弹。若识别失败后出现跑鱼提示，会学习本轮耗时并在下一轮提前 1–2 秒兜底。",
+            "fixed_delay": f"模式 2（推荐）：不分析体力条，上钩后等待 {delay:.1f} 秒收鱼。支持 0.1 秒微调，适合体力条无法稳定识别的场景。",
             "instant": "模式 3：只要识别到上钩鱼图标，立即按 Space 收杆。",
         }
         self.catch_strategy_hint.setText(hints.get(strategy, hints["stamina_bounce"]))
@@ -1461,12 +1580,12 @@ class MainWindow(QMainWindow):
         learned = self.engine.config().learned_escape_seconds
         if learned <= 0:
             self.learned_escape_label.setText(
-                "跑鱼计时：尚未学习。识别到“讓牠跑掉了”后会自动记录本轮耗时。"
+                "尚未学习。识别到“讓牠跑掉了”后会自动记录本轮耗时。"
             )
             return
         target, margin = FishingEngine.learned_collect_timing(learned)
         self.learned_escape_label.setText(
-            f"跑鱼计时：上次 {learned:.1f} 秒；识别仍失败时将在 "
+            f"上次跑鱼 {learned:.1f} 秒；识别仍失败时将在 "
             f"{target:.1f} 秒兜底（提前 {margin:.1f} 秒）。"
         )
 
@@ -1629,6 +1748,27 @@ class MainWindow(QMainWindow):
         self.open_release_button.setEnabled(bool(result.release_url))
         if result.ok:
             self._append_log(result.message, EventKind.INFO)
+        if (
+            result.update_available
+            and result.latest_version
+            and result.latest_version != self._notified_release_version
+        ):
+            self._notified_release_version = result.latest_version
+            self._show_update_dialog(result)
+
+    def _show_update_dialog(self, result: UpdateResult) -> None:
+        if self._update_dialog is not None:
+            self._update_dialog.close()
+        dialog = UpdateAvailableDialog(result, self)
+        self._update_dialog = dialog
+        dialog.finished.connect(
+            lambda _code, current=dialog: self._clear_update_dialog(current)
+        )
+        dialog.open()
+
+    def _clear_update_dialog(self, dialog: UpdateAvailableDialog) -> None:
+        if self._update_dialog is dialog:
+            self._update_dialog = None
 
     def _open_release_page(self) -> None:
         if self._last_release_url:
@@ -1671,6 +1811,7 @@ class MainWindow(QMainWindow):
         if config.capture_mode == "window":
             if config.target_button_offset is None:
                 self.calibration_summary.setText("后台模式尚未校准。选择洛奇 M 窗口后，将鼠标放在按钮中心并校准。")
+                self._set_runtime_state("等待校准")
                 return
             offset_x, offset_y = config.target_button_offset
             self.calibration_summary.setText(
@@ -1679,6 +1820,7 @@ class MainWindow(QMainWindow):
         else:
             if config.button_center is None:
                 self.calibration_summary.setText("尚未校准。请把鼠标停在圆形按钮中心后按 F7；记录时鼠标不会移动。")
+                self._set_runtime_state("等待校准")
                 return
             x, y = config.button_center
             self.calibration_summary.setText(
@@ -1686,6 +1828,7 @@ class MainWindow(QMainWindow):
             )
         if not self.engine.is_monitoring():
             self._set_status("idle", "●  已校准，待启动")
+            self._set_runtime_state("等待启动")
     def _refresh_threshold_display(self, threshold: int) -> None:
         self.threshold_value.setText(f"{threshold} px")
         if self.recognition_backend_combo.currentData() == "pixel":
@@ -1693,7 +1836,7 @@ class MainWindow(QMainWindow):
 
     def _consume_engine_event(self, event: EngineEvent) -> None:
         if event.kind == EventKind.METRIC:
-            if event.recognition_source in {"ok_feature", "compass_pixel"}:
+            if event.recognition_source in {"ok_feature", "v2_signature", "compass_pixel"}:
                 confidence = max(0.0, min(1.0, event.recognition_confidence))
                 caption = (
                     "指南针中心黑点"
@@ -1737,6 +1880,30 @@ class MainWindow(QMainWindow):
                 self.stamina_metric.value_label.setText("等待上钩")
                 self.stamina_progress.setValue(0)
             self.runtime_detail.setText(event.message)
+            if event.waiting_for_bounce:
+                bounce_states = {
+                    "fixed_delay": "定时收鱼",
+                    "stamina_bounce": "观察体力条",
+                    "instant": "准备收杆",
+                }
+                self._set_runtime_state(
+                    bounce_states.get(event.catch_strategy, "准备收杆"),
+                    "running",
+                )
+            else:
+                icon_states = {
+                    IconState.NORMAL: "识别中",
+                    IconState.READY_TO_CAST: "准备抛竿",
+                    IconState.WAITING_BITE: "等待上钩",
+                    IconState.FISH_HOOKED: "已经上钩",
+                    IconState.IDLE_RECOVERY: "恢复钓鱼",
+                    IconState.HORSE_MOUNT_PROMPT: "骑乘纠错",
+                    IconState.HORSE_DISMOUNT_PROMPT: "骑乘纠错",
+                }
+                self._set_runtime_state(
+                    icon_states.get(event.icon_state, "识别中"),
+                    "running",
+                )
             return
 
         self._sync_learned_escape_status()
@@ -1754,6 +1921,7 @@ class MainWindow(QMainWindow):
                 self.start_button.style().unpolish(self.start_button)
                 self.start_button.style().polish(self.start_button)
                 self._set_status("running", "●  监测运行中")
+                self._set_runtime_state("识别中", "running")
             else:
                 self.runtime_title.setText("已暂停")
                 self.runtime_detail.setText("暂停期间不会发送按键。")
@@ -1762,11 +1930,14 @@ class MainWindow(QMainWindow):
                 self.start_button.style().unpolish(self.start_button)
                 self.start_button.style().polish(self.start_button)
                 self._refresh_calibration_summary()
+                self._set_runtime_state("已暂停")
         elif event.kind == EventKind.WARNING:
             self._set_status("warning", "●  需要注意")
+            self._set_runtime_state("需要处理", "warning")
             self.runtime_detail.setText(event.message)
         elif event.kind == EventKind.ERROR:
             self._set_status("warning", "●  识别已暂停")
+            self._set_runtime_state("已停止", "warning")
             self.runtime_detail.setText(event.message)
             self.runtime_title.setText("已暂停")
             self.start_button.setText("开始监测")
@@ -1778,6 +1949,12 @@ class MainWindow(QMainWindow):
             if event.debug_image is not None:
                 self.snapshot_status.setText("快照已保存：fishing_roi_debug.png")
             self._refresh_calibration_summary()
+
+    def _set_runtime_state(self, text: str, state: str = "idle") -> None:
+        self.runtime_state_chip.setProperty("state", state)
+        self.runtime_state_chip.setText(f"状态 · {text}")
+        self.runtime_state_chip.style().unpolish(self.runtime_state_chip)
+        self.runtime_state_chip.style().polish(self.runtime_state_chip)
 
     def _set_status(self, state: str, text: str) -> None:
         self.status_chip.setProperty("state", state)

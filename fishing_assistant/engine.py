@@ -2066,8 +2066,8 @@ class FishingEngine:
     def _monitoring_details(self, config: AppConfig) -> str:
         """输出一条足以复现当前识别环境的启动日志。"""
         strategy = {
-            "stamina_bounce": "模式 1（实验性：中点灰→绿确认）",
-            "fixed_delay": f"模式 2（{config.fallback_collect_delay_seconds:.1f} 秒定时）",
+            "stamina_bounce": "模式 1：中点灰→绿确认",
+            "fixed_delay": f"模式 2（推荐，{config.fallback_collect_delay_seconds:.1f} 秒定时）",
             "instant": "模式 3（上钩立即收杆）",
         }[self._catch_strategy(config)]
         icon_recognizer = (
