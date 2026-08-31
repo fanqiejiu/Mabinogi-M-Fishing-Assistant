@@ -999,6 +999,7 @@ class FishingEngineTests(unittest.TestCase):
 
     def test_f7_calibration_records_cursor_without_moving_it(self) -> None:
         engine = FishingEngine()
+        engine._config = AppConfig(capture_mode="screen")  # type: ignore[attr-defined]
         with patch("fishing_assistant.engine.pyautogui.position", return_value=(1700, 910)), patch(
             "fishing_assistant.engine.pyautogui.moveTo"
         ) as move, patch("fishing_assistant.engine.save_config"):
