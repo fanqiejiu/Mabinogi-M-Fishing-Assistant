@@ -53,12 +53,14 @@ class FishingEngineTests(unittest.TestCase):
             with patch("fishing_assistant.config.CONFIG_PATH", config_path):
                 config = load_config()
 
-        self.assertEqual(config.schema_version, 14)
+        self.assertEqual(config.schema_version, 15)
         self.assertEqual(config.recognition_backend, "ok")
         self.assertEqual(config.runtime_error_retry_count, 5)
         self.assertTrue(config.auto_scale_roi)
         self.assertEqual(config.fallback_collect_delay_seconds, 5.3)
         self.assertIsInstance(config.fallback_collect_delay_seconds, float)
+        self.assertEqual(config.fixed_delay_latest_collect_seconds, 10.5)
+        self.assertIsInstance(config.fixed_delay_latest_collect_seconds, float)
 
     def test_integer_fixed_delay_migrates_to_float(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -75,9 +77,10 @@ class FishingEngineTests(unittest.TestCase):
             with patch("fishing_assistant.config.CONFIG_PATH", config_path):
                 config = load_config()
 
-        self.assertEqual(config.schema_version, 14)
+        self.assertEqual(config.schema_version, 15)
         self.assertEqual(config.fallback_collect_delay_seconds, 5.0)
         self.assertIsInstance(config.fallback_collect_delay_seconds, float)
+        self.assertEqual(config.fixed_delay_latest_collect_seconds, 10.5)
 
     def test_auto_roi_scales_common_resolutions_and_tolerates_window_borders(self) -> None:
         self.assertEqual(scaled_roi_size(1920, 1080), (160, 180))
@@ -485,6 +488,46 @@ class FishingEngineTests(unittest.TestCase):
             engine._process_frame(766, config, IconState.READY_TO_CAST)
         self.assertEqual(press.call_args_list[0].args, ("space",))
         self.assertEqual(press.call_args_list[1].args, ("space",))
+
+    def test_fixed_delay_latest_deadline_limits_long_wait(self) -> None:
+        config = AppConfig(
+            catch_strategy="fixed_delay",
+            fallback_collect_delay_seconds=14.0,
+            fixed_delay_latest_collect_seconds=10.5,
+            trigger_consecutive_frames=1,
+            press_cooldown_ms=0,
+        )
+        engine = FishingEngine()
+        with patch(
+            "fishing_assistant.engine.time.monotonic",
+            side_effect=[100.0, 110.4, 110.5],
+        ), patch.object(engine, "_press_key") as press:
+            engine._process_frame(1985, config, IconState.FISH_HOOKED)
+            engine._process_frame(1985, config, IconState.FISH_HOOKED)
+            press.assert_not_called()
+            engine._process_frame(1985, config, IconState.FISH_HOOKED)
+
+        press.assert_called_once_with("space", config)
+
+    def test_fixed_delay_skips_target_that_disappears_before_wait(self) -> None:
+        config = AppConfig(
+            catch_strategy="fixed_delay",
+            fallback_collect_delay_seconds=5.3,
+            fixed_delay_latest_collect_seconds=10.5,
+            trigger_consecutive_frames=1,
+            clear_consecutive_frames=1,
+            press_cooldown_ms=0,
+        )
+        engine = FishingEngine()
+        with patch(
+            "fishing_assistant.engine.time.monotonic",
+            side_effect=[100.0, 105.1],
+        ), patch.object(engine, "_press_key") as press:
+            engine._process_frame(1985, config, IconState.FISH_HOOKED)
+            engine._process_frame(0, config, IconState.NORMAL)
+
+        press.assert_not_called()
+        self.assertFalse(engine._fish_resolution_pending)  # type: ignore[attr-defined]
 
     def test_instant_mode_collects_as_soon_as_hook_is_detected(self) -> None:
         config = AppConfig(

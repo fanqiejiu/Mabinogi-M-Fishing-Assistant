@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QSlider,
     QSpinBox,
     QStackedWidget,
+    QTextBrowser,
     QVBoxLayout,
     QWidget,
 )
@@ -56,6 +57,7 @@ from .updates import UpdateResult, check_github_release
 
 NIGHT_STYLE = """
 QMainWindow { background: #09111F; color: #F7FAFC; }
+QDialog#updateDialog { background: #111D2F; }
 QWidget { color: #EEF4FB; font-family: 'Segoe UI'; }
 QFrame#sidebar { background: #0D1728; border-right: 1px solid #1E2B3E; }
 QFrame#contentSurface { background: #09111F; }
@@ -107,6 +109,10 @@ QFrame#timingCallout { background: #0A1626; border: 1px solid #29415E; border-ra
 QLabel#timingTitle { color: #75E4BE; font-size: 13px; font-weight: 800; }
 QLabel#updateDialogTitle { color: #F8FBFF; font-size: 19px; font-weight: 800; }
 QLabel#updateDialogVersion { color: #75E4BE; font-size: 14px; font-weight: 700; }
+QTextBrowser#releaseNotes {
+    background: #0A1626; border: 1px solid #29415E; border-radius: 9px;
+    color: #C8D6E6; padding: 9px; font-family: 'Segoe UI'; font-size: 12px;
+}
 QPushButton#navButton {
     border: 0; border-radius: 10px; color: #8EA2BD; text-align: left;
     padding: 11px 14px; font-size: 13px; font-weight: 600;
@@ -152,6 +158,7 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
 
 DAY_STYLE = NIGHT_STYLE + """
 QMainWindow, QFrame#contentSurface, QScrollArea, QWidget#pageCanvas { background: #F4F7FB; color: #172236; }
+QDialog#updateDialog { background: #FFFFFF; }
 QWidget { color: #1B2A40; }
 QFrame#sidebar { background: #FFFFFF; border-right-color: #D9E3EF; }
 QFrame#card, QFrame#metricCard { background: #FFFFFF; border-color: #D7E2EE; }
@@ -178,6 +185,7 @@ QFrame#timingCallout { background: #F4F9FC; border-color: #C9D8E8; }
 QLabel#timingTitle { color: #16835F; }
 QLabel#updateDialogTitle { color: #14233A; }
 QLabel#updateDialogVersion { color: #16835F; }
+QTextBrowser#releaseNotes { background: #F7FAFD; border-color: #C9D8E8; color: #304A66; }
 QPushButton#navButton { color: #60758E; }
 QPushButton#navButton:hover { background: #EDF3F8; color: #172C48; }
 QPushButton#navButton:checked { background: #DDF5EA; color: #107450; }
@@ -262,10 +270,12 @@ class UpdateAvailableDialog(QDialog):
     def __init__(self, result: UpdateResult, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._release_url = result.release_url
+        self.setObjectName("updateDialog")
         self.setWindowTitle("发现新版本")
         self.setModal(False)
         self.setMinimumWidth(380)
         self.setMaximumWidth(430)
+        self.setMaximumHeight(520)
         self.setSizeGripEnabled(False)
 
         layout = QVBoxLayout(self)
@@ -284,12 +294,25 @@ class UpdateAvailableDialog(QDialog):
         message.setWordWrap(True)
         layout.addWidget(message)
 
+        notes_title = QLabel("Release 更新说明")
+        notes_title.setObjectName("formLabel")
+        layout.addWidget(notes_title)
+        self.release_notes = QTextBrowser()
+        self.release_notes.setObjectName("releaseNotes")
+        self.release_notes.setOpenExternalLinks(True)
+        self.release_notes.setMinimumHeight(105)
+        self.release_notes.setMaximumHeight(180)
+        self.release_notes.setMarkdown(
+            result.release_notes or "本次 Release 未填写更新说明。"
+        )
+        layout.addWidget(self.release_notes)
+
         actions = QHBoxLayout()
         actions.addStretch(1)
-        later_button = QPushButton("稍后")
+        later_button = QPushButton("关闭")
         later_button.clicked.connect(self.close)
         actions.addWidget(later_button)
-        release_button = QPushButton("查看更新")
+        release_button = QPushButton("前往更新")
         release_button.setObjectName("primaryButton")
         release_button.setEnabled(bool(self._release_url))
         release_button.clicked.connect(self._open_release)
@@ -746,6 +769,9 @@ class MainWindow(QMainWindow):
         self.fallback_delay_spin = self._double_spin_box(
             0.1, 60.0, 5.3, " 秒"
         )
+        self.latest_collect_spin = self._double_spin_box(
+            0.1, 60.0, 10.5, " 秒"
+        )
         self.stamina_zoom_spin = self._spin_box(0, 12, 5, " 格")
 
         def option_panel(
@@ -780,15 +806,43 @@ class MainWindow(QMainWindow):
         timing_layout.addWidget(self.learned_escape_label)
         mode_one_panel.layout().addWidget(timing_panel)
 
-        self.catch_option_stack = QStackedWidget()
-        self.catch_option_stack.addWidget(mode_one_panel)
-        self.catch_option_stack.addWidget(
-            option_panel(
-                "收杆等待时长",
-                "支持 0.1 秒微调；默认 5.3 秒。",
-                self.fallback_delay_spin,
+        mode_two_panel = QFrame()
+        mode_two_panel.setObjectName("strategyOption")
+        mode_two_layout = QVBoxLayout(mode_two_panel)
+        mode_two_layout.setContentsMargins(14, 12, 14, 12)
+        mode_two_layout.setSpacing(10)
+        mode_two_layout.addWidget(
+            self._form_label(
+                "模式二计时",
+                "垃圾通常约 5 秒消失，普通鱼约 11 秒消失；两个时间均支持 0.1 秒微调。",
             )
         )
+        mode_two_grid = QGridLayout()
+        mode_two_grid.setHorizontalSpacing(14)
+        mode_two_grid.setVerticalSpacing(6)
+        mode_two_grid.addWidget(
+            self._form_label("等待收杆秒数", "默认 5.3 秒，用于跳过较早消失的垃圾。"),
+            0,
+            0,
+        )
+        mode_two_grid.addWidget(
+            self._form_label("最迟空格拉钩秒数", "默认 10.5 秒，在普通鱼消失前留出余量。"),
+            0,
+            1,
+        )
+        mode_two_grid.addWidget(self.fallback_delay_spin, 1, 0)
+        mode_two_grid.addWidget(self.latest_collect_spin, 1, 1)
+        mode_two_grid.setColumnStretch(0, 1)
+        mode_two_grid.setColumnStretch(1, 1)
+        mode_two_layout.addLayout(mode_two_grid)
+        self.fixed_delay_effective_hint = QLabel()
+        self.fixed_delay_effective_hint.setObjectName("helper")
+        self.fixed_delay_effective_hint.setWordWrap(True)
+        mode_two_layout.addWidget(self.fixed_delay_effective_hint)
+
+        self.catch_option_stack = QStackedWidget()
+        self.catch_option_stack.addWidget(mode_one_panel)
+        self.catch_option_stack.addWidget(mode_two_panel)
         self.catch_option_stack.addWidget(
             option_panel(
                 "模式 3 已就绪",
@@ -1440,6 +1494,7 @@ class MainWindow(QMainWindow):
             self.runtime_retry_spin,
             self.catch_strategy_combo,
             self.fallback_delay_spin,
+            self.latest_collect_spin,
             self.stamina_zoom_spin,
             self.auto_resume_check,
             self.auto_recover_check,
@@ -1470,6 +1525,9 @@ class MainWindow(QMainWindow):
         self.runtime_retry_spin.setValue(config.runtime_error_retry_count)
         self._select_combo_data(self.catch_strategy_combo, config.catch_strategy)
         self.fallback_delay_spin.setValue(config.fallback_collect_delay_seconds)
+        self.latest_collect_spin.setValue(
+            config.fixed_delay_latest_collect_seconds
+        )
         self.stamina_zoom_spin.setValue(config.stamina_zoom_in_steps)
         self.auto_resume_check.setChecked(config.auto_resume_fishing)
         self.auto_recover_check.setChecked(config.auto_recover_idle)
@@ -1522,6 +1580,9 @@ class MainWindow(QMainWindow):
         self.fallback_delay_spin.valueChanged.connect(
             self._fallback_delay_changed
         )
+        self.latest_collect_spin.valueChanged.connect(
+            self._latest_collect_changed
+        )
         self.stamina_zoom_spin.valueChanged.connect(
             lambda value: self.engine.update_config(stamina_zoom_in_steps=value)
         )
@@ -1563,14 +1624,26 @@ class MainWindow(QMainWindow):
         if self.catch_strategy_combo.currentData() == "fixed_delay":
             self._sync_catch_strategy_controls()
 
+    def _latest_collect_changed(self, value: float) -> None:
+        self.engine.update_config(
+            fixed_delay_latest_collect_seconds=float(value)
+        )
+        if self.catch_strategy_combo.currentData() == "fixed_delay":
+            self._sync_catch_strategy_controls()
+
     def _sync_catch_strategy_controls(self) -> None:
         strategy = str(self.catch_strategy_combo.currentData())
         stack_index = {"stamina_bounce": 0, "fixed_delay": 1, "instant": 2}.get(strategy, 0)
         self.catch_option_stack.setCurrentIndex(stack_index)
         delay = float(self.fallback_delay_spin.value())
+        latest = float(self.latest_collect_spin.value())
+        effective = min(delay, latest)
+        self.fixed_delay_effective_hint.setText(
+            f"实际最晚会在上钩后 {effective:.1f} 秒按 Space；若目标更早消失，则按垃圾处理，不会拉钩。"
+        )
         hints = {
             "stamina_bounce": "模式 1：先用 OK 特征确认中鱼图标并定位体力槽，再观察半条位置的小块颜色。连续变灰后不会收杆；只有再次连续恢复绿色才确认反弹。若识别失败后出现跑鱼提示，会学习本轮耗时并在下一轮提前 1–2 秒兜底。",
-            "fixed_delay": f"模式 2（推荐）：不分析体力条，上钩后等待 {delay:.1f} 秒收鱼。支持 0.1 秒微调，适合体力条无法稳定识别的场景。",
+            "fixed_delay": f"模式 2（推荐）：目标仍存在时，等待 {delay:.1f} 秒收鱼，并以 {latest:.1f} 秒作为最迟拉钩上限；实际采用较早的 {effective:.1f} 秒。",
             "instant": "模式 3：只要识别到上钩鱼图标，立即按 Space 收杆。",
         }
         self.catch_strategy_hint.setText(hints.get(strategy, hints["stamina_bounce"]))
@@ -1681,6 +1754,9 @@ class MainWindow(QMainWindow):
             recovery_cooldown_ms=defaults.recovery_cooldown_ms,
             catch_strategy=defaults.catch_strategy,
             fallback_collect_delay_seconds=defaults.fallback_collect_delay_seconds,
+            fixed_delay_latest_collect_seconds=(
+                defaults.fixed_delay_latest_collect_seconds
+            ),
             stamina_scan_interval_ms=defaults.stamina_scan_interval_ms,
             stamina_zoom_in_steps=defaults.stamina_zoom_in_steps,
         )
@@ -1855,12 +1931,10 @@ class MainWindow(QMainWindow):
                 self.red_progress.setValue(min(event.red_pixels, maximum))
             if event.waiting_for_bounce:
                 if event.catch_strategy == "fixed_delay":
-                    total = max(
-                        0.1,
-                        float(
-                            self.engine.config().fallback_collect_delay_seconds
-                        ),
+                    _wait, _latest, collect_after = FishingEngine.fixed_delay_timing(
+                        self.engine.config()
                     )
+                    total = max(0.1, collect_after)
                     percent = min(
                         100,
                         round(event.hook_elapsed_seconds / total * 100),

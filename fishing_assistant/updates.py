@@ -19,6 +19,7 @@ class UpdateResult:
     latest_version: str | None = None
     release_url: str | None = None
     update_available: bool = False
+    release_notes: str = ""
 
 
 def validate_github_repo(repository: str) -> bool:
@@ -64,6 +65,7 @@ def check_github_release(repository: str, current_version: str) -> UpdateResult:
 
     tag = str(payload.get("tag_name") or "").strip()
     release_url = str(payload.get("html_url") or "").strip() or None
+    release_notes = str(payload.get("body") or "").strip()
     if not tag:
         return UpdateResult(False, "Release 未包含 tag_name，无法比较版本。", release_url=release_url)
     try:
@@ -71,5 +73,18 @@ def check_github_release(repository: str, current_version: str) -> UpdateResult:
     except ValueError:
         return UpdateResult(False, f"Release 版本号“{tag}”格式无法比较。", release_url=release_url)
     if available:
-        return UpdateResult(True, f"发现新版本 {tag}，可前往 GitHub 查看。", tag, release_url, True)
-    return UpdateResult(True, f"已是最新版本（当前 {current_version}，Release {tag}）。", tag, release_url)
+        return UpdateResult(
+            True,
+            f"发现新版本 {tag}，可前往 GitHub 查看。",
+            latest_version=tag,
+            release_url=release_url,
+            update_available=True,
+            release_notes=release_notes,
+        )
+    return UpdateResult(
+        True,
+        f"已是最新版本（当前 {current_version}，Release {tag}）。",
+        latest_version=tag,
+        release_url=release_url,
+        release_notes=release_notes,
+    )

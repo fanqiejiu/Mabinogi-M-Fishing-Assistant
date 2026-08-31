@@ -73,7 +73,7 @@ def scaled_roi_size(width: int, height: int) -> tuple[int, int]:
 class AppConfig:
     """以后新增选项时，在此处加入字段即可自动兼容旧配置文件。"""
 
-    schema_version: int = 14
+    schema_version: int = 15
     button_center: tuple[int, int] | None = None
     monitor_index: int = 1
     display_mode: str = "borderless"
@@ -105,6 +105,8 @@ class AppConfig:
     # stamina_bounce：体力槽中点灰→绿时收鱼；fixed_delay：按自定义秒数收鱼；instant：上钩即收。
     catch_strategy: str = "stamina_bounce"
     fallback_collect_delay_seconds: float = 5.3
+    # 模式二的安全上限；普通鱼约 11 秒消失，默认提前 0.5 秒收杆。
+    fixed_delay_latest_collect_seconds: float = 10.5
     stamina_scan_interval_ms: int = 60
     stamina_zoom_in_steps: int = 5
     # 模式一检测到跑鱼提示后记录本次上钩持续时间，供下一次计时兜底。
@@ -214,12 +216,26 @@ def _config_from_raw(raw: dict) -> AppConfig:
         except (TypeError, ValueError):
             raw["fallback_collect_delay_seconds"] = 5.3
         raw["schema_version"] = 14
+    if int(raw.get("schema_version", 0)) < 15:
+        raw["fixed_delay_latest_collect_seconds"] = 10.5
+        raw["schema_version"] = 15
     try:
         raw["fallback_collect_delay_seconds"] = float(
             raw.get("fallback_collect_delay_seconds", 5.3)
         )
     except (TypeError, ValueError):
         raw["fallback_collect_delay_seconds"] = 5.3
+    try:
+        latest_collect = float(
+            raw.get("fixed_delay_latest_collect_seconds", 10.5)
+        )
+        raw["fixed_delay_latest_collect_seconds"] = (
+            latest_collect
+            if math.isfinite(latest_collect) and 0.1 <= latest_collect <= 60.0
+            else 10.5
+        )
+    except (TypeError, ValueError):
+        raw["fixed_delay_latest_collect_seconds"] = 10.5
     if raw.get("recognition_backend") not in {"ok", "pixel"}:
         raw["recognition_backend"] = "ok"
     # 更新源始终固定在项目自身仓库；是否启动时检查由用户设置决定。

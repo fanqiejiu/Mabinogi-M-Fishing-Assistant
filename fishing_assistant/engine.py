@@ -2007,12 +2007,16 @@ class FishingEngine:
                 self._schedule_recast(now, config, "计时目标已消失")
             elif fish_visible and strategy == "fixed_delay":
                 hook_started = self._hook_started_at or now
-                if now - hook_started >= config.fallback_collect_delay_seconds:
-                    self._collect_fish(
-                        now,
-                        config,
-                        "备用模式 2 计时完成，已按 Space 收鱼。",
+                wait_seconds, latest_seconds, collect_after = (
+                    self.fixed_delay_timing(config)
+                )
+                if now - hook_started >= collect_after:
+                    message = (
+                        f"模式 2 已到最迟拉钩时间 {latest_seconds:.1f} 秒，已按 Space 收鱼。"
+                        if latest_seconds < wait_seconds
+                        else f"模式 2 等待 {wait_seconds:.1f} 秒完成，已按 Space 收鱼。"
                     )
+                    self._collect_fish(now, config, message)
         elif (
             fish_visible
             and self._red_frames >= config.trigger_consecutive_frames
@@ -2063,11 +2067,23 @@ class FishingEngine:
             return config.catch_strategy
         return "stamina_bounce"
 
+    @staticmethod
+    def fixed_delay_timing(config: AppConfig) -> tuple[float, float, float]:
+        """返回模式二的等待、最迟拉钩和实际执行秒数。"""
+        wait_seconds = max(0.0, float(config.fallback_collect_delay_seconds))
+        latest_seconds = max(
+            0.0, float(config.fixed_delay_latest_collect_seconds)
+        )
+        return wait_seconds, latest_seconds, min(wait_seconds, latest_seconds)
+
     def _monitoring_details(self, config: AppConfig) -> str:
         """输出一条足以复现当前识别环境的启动日志。"""
         strategy = {
             "stamina_bounce": "模式 1：中点灰→绿确认",
-            "fixed_delay": f"模式 2（推荐，{config.fallback_collect_delay_seconds:.1f} 秒定时）",
+            "fixed_delay": (
+                f"模式 2（推荐，等待 {config.fallback_collect_delay_seconds:.1f} 秒，"
+                f"最迟 {config.fixed_delay_latest_collect_seconds:.1f} 秒）"
+            ),
             "instant": "模式 3（上钩立即收杆）",
         }[self._catch_strategy(config)]
         icon_recognizer = (
@@ -2148,9 +2164,13 @@ class FishingEngine:
             self._collect_fish(now, config, "模式 3：检测到上钩图标，已立即按 Space 收杆。")
             return
         if strategy == "fixed_delay":
+            wait_seconds, latest_seconds, collect_after = self.fixed_delay_timing(
+                config
+            )
             self._emit(
                 EventKind.INFO,
-                f"检测到上钩，备用模式 2 开始计时 {config.fallback_collect_delay_seconds:.1f} 秒。",
+                f"检测到上钩，模式 2 开始计时：等待 {wait_seconds:.1f} 秒，"
+                f"最迟 {latest_seconds:.1f} 秒拉钩；本轮将在 {collect_after:.1f} 秒收杆。",
                 monitoring=True,
             )
             return
@@ -2420,9 +2440,12 @@ class FishingEngine:
         if self._fish_resolution_pending:
             if self._catch_strategy(config) == "fixed_delay":
                 elapsed = max(0.0, now - (self._hook_started_at or now))
+                wait_seconds, latest_seconds, collect_after = (
+                    self.fixed_delay_timing(config)
+                )
                 return (
-                    f"备用模式 2：已等待 {elapsed:.1f} / "
-                    f"{config.fallback_collect_delay_seconds:.1f} 秒"
+                    f"模式 2：已等待 {elapsed:.1f} / {collect_after:.1f} 秒"
+                    f"（等待 {wait_seconds:.1f}，最迟 {latest_seconds:.1f}）"
                 )
             if self._stamina_peak_width:
                 if self._stamina_rebound_started:

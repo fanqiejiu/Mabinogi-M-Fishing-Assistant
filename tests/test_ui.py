@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication, QLabel
+from PySide6.QtWidgets import QApplication, QLabel, QTextBrowser
 
 from fishing_assistant.ui import (
     MainWindow,
@@ -55,6 +55,7 @@ class UiRegressionTests(unittest.TestCase):
             latest_version="v0.6.1",
             release_url="https://github.com/fanqiejiu/Mabinogi-M-Fishing-Assistant/releases/tag/v0.6.1",
             update_available=True,
+            release_notes="1. 修复模式二计时。\n2. 优化更新弹窗。",
         )
         dialog = UpdateAvailableDialog(result)
         try:
@@ -63,6 +64,9 @@ class UiRegressionTests(unittest.TestCase):
             labels = "\n".join(label.text() for label in dialog.findChildren(QLabel))
             self.assertIn("发现新版本", labels)
             self.assertIn("v0.6.1", labels)
+            notes = dialog.findChild(QTextBrowser, "releaseNotes")
+            self.assertIsNotNone(notes)
+            self.assertIn("修复模式二计时", notes.toPlainText())
         finally:
             dialog.close()
 
