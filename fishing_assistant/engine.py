@@ -2322,13 +2322,22 @@ class FishingEngine:
                 pass
         roi_width, roi_height = effective_roi_size(config, source_resolution)
         roi_mode = "自动" if config.auto_scale_roi else "手动"
+        forward_compensation = (
+            "关闭"
+            if config.recovery_forward_compensation_interval <= 0
+            else (
+                f"每 {config.recovery_forward_compensation_interval} 次恢复"
+                f"补按 W {config.recovery_forward_compensation_taps} 次"
+            )
+        )
         common = (
             f"策略 {strategy}；图标识别 {icon_recognizer}；"
             "异常提示识别 OK FeatureSet；"
             f"识别区域 {roi_mode} {roi_width}×{roi_height}；"
             f"轮询 {config.poll_interval_ms} ms；"
             f"临时错误重试 {config.runtime_error_retry_count} 次；"
-            f"W/S 恢复上限 {config.recovery_attempt_limit} 次{pixel_detail}。"
+            f"W/S 恢复上限 {config.recovery_attempt_limit} 次；"
+            f"向前补偿 {forward_compensation}{pixel_detail}。"
         )
         if config.capture_mode == "window":
             backend = "OK WGC" if config.window_backend == "ok" else "PrintWindow"
@@ -2900,14 +2909,18 @@ class FishingEngine:
         self._idle_frames = 0
         was_enabled = self._enabled.is_set()
         generation = self._interrupt_generation
+
+        def interrupted() -> bool:
+            return was_enabled and (
+                not self._enabled.is_set()
+                or self._shutdown.is_set()
+                # 代数比对能识破「停止后又立刻重启」的 ABA 情形。
+                or generation != self._interrupt_generation
+            )
+
         self._tap_key("w", config.recovery_key_hold_ms, config)
         time.sleep(config.recovery_pause_ms / 1000)
-        if was_enabled and (
-            not self._enabled.is_set()
-            or self._shutdown.is_set()
-            # 代数比对能识破「停止后又立刻重启」的 ABA 情形。
-            or generation != self._interrupt_generation
-        ):
+        if interrupted():
             # Esc / 暂停必须是可靠的送键取消边界：W 之后的停顿期间
             # 被停止时，不再补送 S（焦点可能已切到其他程序）。
             self._emit(
@@ -2915,14 +2928,52 @@ class FishingEngine:
             )
             return
         self._tap_key("s", config.recovery_key_hold_ms, config)
+        if interrupted():
+            self._emit(
+                EventKind.WARNING,
+                "恢复序列已被停止中断，已取消向前补偿。",
+            )
+            return
+        self._recovery_attempts_without_success += 1
+        compensation_taps = 0
+        compensation_interval = max(
+            0, min(20, int(config.recovery_forward_compensation_interval))
+        )
+        configured_taps = max(
+            1, min(10, int(config.recovery_forward_compensation_taps))
+        )
+        if (
+            compensation_interval > 0
+            and self._recovery_attempts_without_success % compensation_interval == 0
+        ):
+            for _tap_index in range(configured_taps):
+                time.sleep(config.recovery_pause_ms / 1000)
+                if interrupted():
+                    self._emit(
+                        EventKind.WARNING,
+                        "向前补偿序列已被停止中断，未发送后续 W。",
+                    )
+                    return
+                self._tap_key("w", config.recovery_key_hold_ms, config)
+                compensation_taps += 1
+                if interrupted():
+                    self._emit(
+                        EventKind.WARNING,
+                        "向前补偿序列已被停止中断，未发送后续 W。",
+                    )
+                    return
         if config.capture_mode == "window" and config.auto_resume_fishing:
             self._refresh_hover_before_recast = True
-        self._recovery_attempts_without_success += 1
         message = (
             "启动时识别到指南针图标，已执行 W → S 移动恢复。"
             if startup
             else "检测到指南针状态，已执行 W → S 移动恢复。"
         )
+        if compensation_taps:
+            message = (
+                f"{message[:-1]}；第 {self._recovery_attempts_without_success} 次恢复"
+                f"已额外短按 W {compensation_taps} 次进行向前补偿。"
+            )
         self._emit(EventKind.SUCCESS, message, monitoring=True)
         self._announce_blocking_message_scan_if_needed()
 

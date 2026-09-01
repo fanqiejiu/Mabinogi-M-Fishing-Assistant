@@ -905,6 +905,8 @@ class MainWindow(QMainWindow):
             1000, 10000, 4500, " ms"
         )
         self.recovery_attempt_limit_spin = self._spin_box(1, 20, 5, " 次")
+        self.recovery_forward_interval_spin = self._spin_box(0, 20, 2, " 次")
+        self.recovery_forward_taps_spin = self._spin_box(1, 10, 1, " 次")
         recovery_controls = [
             (
                 "W / S 按住时间",
@@ -920,6 +922,16 @@ class MainWindow(QMainWindow):
                 "W/S 恢复上限",
                 "连续失败达到上限后停止监测",
                 self.recovery_attempt_limit_spin,
+            ),
+            (
+                "向前补偿周期",
+                "每累计几次 W→S 后触发；0 为关闭",
+                self.recovery_forward_interval_spin,
+            ),
+            (
+                "补按 W 次数",
+                "触发时额外连续短按 W",
+                self.recovery_forward_taps_spin,
             ),
         ]
         for index, (label, hint, control) in enumerate(recovery_controls):
@@ -1517,6 +1529,8 @@ class MainWindow(QMainWindow):
             self.recovery_hold_spin,
             self.recovery_cooldown_spin,
             self.recovery_attempt_limit_spin,
+            self.recovery_forward_interval_spin,
+            self.recovery_forward_taps_spin,
             self.github_auto_check,
         ]
         blockers = [QSignalBlocker(control) for control in controls]
@@ -1551,6 +1565,12 @@ class MainWindow(QMainWindow):
         self.recovery_hold_spin.setValue(config.recovery_key_hold_ms)
         self.recovery_cooldown_spin.setValue(config.recovery_cooldown_ms)
         self.recovery_attempt_limit_spin.setValue(config.recovery_attempt_limit)
+        self.recovery_forward_interval_spin.setValue(
+            config.recovery_forward_compensation_interval
+        )
+        self.recovery_forward_taps_spin.setValue(
+            config.recovery_forward_compensation_taps
+        )
         self.github_auto_check.setChecked(config.github_auto_check)
         del blockers
         self._sync_target_mode_controls()
@@ -1622,6 +1642,16 @@ class MainWindow(QMainWindow):
         )
         self.recovery_attempt_limit_spin.valueChanged.connect(
             lambda value: self.engine.update_config(recovery_attempt_limit=value)
+        )
+        self.recovery_forward_interval_spin.valueChanged.connect(
+            lambda value: self.engine.update_config(
+                recovery_forward_compensation_interval=value
+            )
+        )
+        self.recovery_forward_taps_spin.valueChanged.connect(
+            lambda value: self.engine.update_config(
+                recovery_forward_compensation_taps=value
+            )
         )
         self.restore_button.clicked.connect(self._restore_recommended_settings)
 
@@ -1772,6 +1802,12 @@ class MainWindow(QMainWindow):
             recovery_pause_ms=defaults.recovery_pause_ms,
             recovery_cooldown_ms=defaults.recovery_cooldown_ms,
             recovery_attempt_limit=defaults.recovery_attempt_limit,
+            recovery_forward_compensation_interval=(
+                defaults.recovery_forward_compensation_interval
+            ),
+            recovery_forward_compensation_taps=(
+                defaults.recovery_forward_compensation_taps
+            ),
             catch_strategy=defaults.catch_strategy,
             fallback_collect_delay_seconds=defaults.fallback_collect_delay_seconds,
             fixed_delay_latest_collect_seconds=(

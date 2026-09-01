@@ -53,7 +53,7 @@ class FishingEngineTests(unittest.TestCase):
             with patch("fishing_assistant.config.CONFIG_PATH", config_path):
                 config = load_config()
 
-        self.assertEqual(config.schema_version, 16)
+        self.assertEqual(config.schema_version, 17)
         self.assertEqual(config.recognition_backend, "ok")
         self.assertEqual(config.runtime_error_retry_count, 5)
         self.assertTrue(config.auto_scale_roi)
@@ -62,6 +62,8 @@ class FishingEngineTests(unittest.TestCase):
         self.assertEqual(config.fixed_delay_latest_collect_seconds, 10.5)
         self.assertIsInstance(config.fixed_delay_latest_collect_seconds, float)
         self.assertEqual(config.recovery_attempt_limit, 5)
+        self.assertEqual(config.recovery_forward_compensation_interval, 2)
+        self.assertEqual(config.recovery_forward_compensation_taps, 1)
 
     def test_integer_fixed_delay_migrates_to_float(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -78,7 +80,7 @@ class FishingEngineTests(unittest.TestCase):
             with patch("fishing_assistant.config.CONFIG_PATH", config_path):
                 config = load_config()
 
-        self.assertEqual(config.schema_version, 16)
+        self.assertEqual(config.schema_version, 17)
         self.assertEqual(config.fallback_collect_delay_seconds, 5.0)
         self.assertIsInstance(config.fallback_collect_delay_seconds, float)
         self.assertEqual(config.fixed_delay_latest_collect_seconds, 10.5)
@@ -104,6 +106,11 @@ class FishingEngineTests(unittest.TestCase):
 
     def test_recovery_attempt_limit_default_is_five(self) -> None:
         self.assertEqual(AppConfig().recovery_attempt_limit, 5)
+
+    def test_forward_compensation_defaults_are_safe(self) -> None:
+        config = AppConfig()
+        self.assertEqual(config.recovery_forward_compensation_interval, 2)
+        self.assertEqual(config.recovery_forward_compensation_taps, 1)
 
     def test_monitor_loop_retries_temporary_window_errors_then_recovers(self) -> None:
         events = []
@@ -781,7 +788,47 @@ class FishingEngineTests(unittest.TestCase):
             FishingEngine.BLOCKING_MESSAGE_RETRY_THRESHOLD,
         )
         self.assertTrue(engine._should_scan_blocking_messages())  # type: ignore[attr-defined]
-        self.assertEqual(tap_key.call_count, FishingEngine.BLOCKING_MESSAGE_RETRY_THRESHOLD * 2)
+        self.assertEqual(
+            tap_key.call_count,
+            FishingEngine.BLOCKING_MESSAGE_RETRY_THRESHOLD * 2 + 1,
+        )
+
+    def test_forward_compensation_runs_after_configured_ws_count(self) -> None:
+        config = AppConfig(
+            recovery_pause_ms=0,
+            recovery_forward_compensation_interval=2,
+            recovery_forward_compensation_taps=2,
+        )
+        events = []
+        engine = FishingEngine(events.append)
+
+        with patch.object(engine, "_tap_key") as tap_key:
+            engine._recover_idle_state(config)
+            engine._recover_idle_state(config)
+
+        self.assertEqual(
+            [item.args[0] for item in tap_key.call_args_list],
+            ["w", "s", "w", "s", "w", "w"],
+        )
+        self.assertIn("第 2 次恢复", events[-1].message)
+        self.assertIn("额外短按 W 2 次", events[-1].message)
+
+    def test_forward_compensation_can_be_disabled(self) -> None:
+        config = AppConfig(
+            recovery_pause_ms=0,
+            recovery_forward_compensation_interval=0,
+            recovery_forward_compensation_taps=3,
+        )
+        engine = FishingEngine()
+
+        with patch.object(engine, "_tap_key") as tap_key:
+            engine._recover_idle_state(config)
+            engine._recover_idle_state(config)
+
+        self.assertEqual(
+            [item.args[0] for item in tap_key.call_args_list],
+            ["w", "s", "w", "s"],
+        )
 
     def test_recovery_attempt_limit_stops_before_another_ws(self) -> None:
         config = AppConfig(

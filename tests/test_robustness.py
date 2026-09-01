@@ -189,6 +189,27 @@ class RecoveryCancellationTests(unittest.TestCase):
         engine._shutdown.set()
         self.assertEqual(taps, ["w"])
 
+    def test_pause_during_forward_compensation_skips_remaining_w(self) -> None:
+        engine = FishingEngine()
+        engine._enabled.set()
+        config = AppConfig(
+            recovery_pause_ms=0,
+            recovery_forward_compensation_interval=1,
+            recovery_forward_compensation_taps=3,
+        )
+        taps = []
+
+        def tap(key: str, _hold_ms: int, _config: AppConfig) -> None:
+            taps.append(key)
+            if taps == ["w", "s", "w"]:
+                engine.set_monitoring(False)
+
+        with patch.object(engine, "_tap_key", side_effect=tap):
+            engine._recover_idle_state(config)
+
+        engine._shutdown.set()
+        self.assertEqual(taps, ["w", "s", "w"])
+
 
 class HotkeyListenerRobustnessTests(unittest.TestCase):
     """快捷键回调里的异常不能杀死 pynput 监听线程。"""

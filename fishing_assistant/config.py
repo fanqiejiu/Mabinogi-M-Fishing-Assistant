@@ -73,7 +73,7 @@ def scaled_roi_size(width: int, height: int) -> tuple[int, int]:
 class AppConfig:
     """以后新增选项时，在此处加入字段即可自动兼容旧配置文件。"""
 
-    schema_version: int = 16
+    schema_version: int = 17
     button_center: tuple[int, int] | None = None
     monitor_index: int = 1
     display_mode: str = "borderless"
@@ -104,6 +104,9 @@ class AppConfig:
     recovery_cooldown_ms: int = 4500
     # 连续 W/S 后仍未进入等待上钩状态时停止，避免角色不断移动离开钓鱼区。
     recovery_attempt_limit: int = 5
+    # 每累计指定次数的 W/S 恢复后，额外短按 W 进行向前补偿；周期为 0 时关闭。
+    recovery_forward_compensation_interval: int = 2
+    recovery_forward_compensation_taps: int = 1
     # stamina_bounce：体力槽中点灰→绿时收鱼；fixed_delay：按自定义秒数收鱼；instant：上钩即收。
     catch_strategy: str = "stamina_bounce"
     fallback_collect_delay_seconds: float = 5.3
@@ -224,6 +227,10 @@ def _config_from_raw(raw: dict) -> AppConfig:
     if int(raw.get("schema_version", 0)) < 16:
         raw["recovery_attempt_limit"] = 5
         raw["schema_version"] = 16
+    if int(raw.get("schema_version", 0)) < 17:
+        raw["recovery_forward_compensation_interval"] = 2
+        raw["recovery_forward_compensation_taps"] = 1
+        raw["schema_version"] = 17
     try:
         raw["fallback_collect_delay_seconds"] = float(
             raw.get("fallback_collect_delay_seconds", 5.3)
@@ -247,6 +254,23 @@ def _config_from_raw(raw: dict) -> AppConfig:
         )
     except (TypeError, ValueError, OverflowError):
         raw["recovery_attempt_limit"] = 5
+    try:
+        raw["recovery_forward_compensation_interval"] = max(
+            0,
+            min(
+                20,
+                int(raw.get("recovery_forward_compensation_interval", 2)),
+            ),
+        )
+    except (TypeError, ValueError, OverflowError):
+        raw["recovery_forward_compensation_interval"] = 2
+    try:
+        raw["recovery_forward_compensation_taps"] = max(
+            1,
+            min(10, int(raw.get("recovery_forward_compensation_taps", 1))),
+        )
+    except (TypeError, ValueError, OverflowError):
+        raw["recovery_forward_compensation_taps"] = 1
     if raw.get("recognition_backend") not in {"ok", "pixel"}:
         raw["recognition_backend"] = "ok"
     # 更新源始终固定在项目自身仓库；是否启动时检查由用户设置决定。

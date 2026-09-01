@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 APP_NAME = "洛奇 M 钓鱼助手"
-APP_VERSION = "0.6.2.2"
+APP_VERSION = "0.6.2.3"
 APP_AUTHOR = "番茄啾"
 APP_DISPLAY_VERSION = APP_VERSION
 GITHUB_REPOSITORY = "fanqiejiu/Mabinogi-M-Fishing-Assistant"
