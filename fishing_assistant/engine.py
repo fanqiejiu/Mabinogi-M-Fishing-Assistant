@@ -2228,7 +2228,7 @@ class FishingEngine:
         ):
             self._begin_fish_resolution(now, config, stamina_sample)
 
-        if (
+        idle_recovery_ready = (
             config.auto_recover_idle
             and icon_state == IconState.IDLE_RECOVERY
             and self._idle_frames >= config.recovery_consecutive_frames
@@ -2236,10 +2236,23 @@ class FishingEngine:
             and not self._fish_resolution_pending
             and not self._escape_watch_until
             and now - self._last_press_at >= self.CAST_TRANSITION_GRACE_SECONDS
-            and now - self._last_recovery_at >= config.recovery_cooldown_ms / 1000
-        ):
-            self._recover_idle_state(config)
-            self._schedule_recast(time.monotonic(), config, "移动恢复完成")
+        )
+        if idle_recovery_ready:
+            recovery_limit = max(1, min(20, int(config.recovery_attempt_limit)))
+            if (
+                self._recovery_attempts_without_success >= recovery_limit
+                and now - self._last_recovery_at
+                >= self.CAST_TRANSITION_GRACE_SECONDS
+            ):
+                self._stop_after_recovery_limit(recovery_limit)
+                return
+            if (
+                self._recovery_attempts_without_success < recovery_limit
+                and now - self._last_recovery_at
+                >= config.recovery_cooldown_ms / 1000
+            ):
+                self._recover_idle_state(config)
+                self._schedule_recast(time.monotonic(), config, "移动恢复完成")
 
         self._perform_pending_recast(now, icon_state, config)
 
@@ -2314,7 +2327,8 @@ class FishingEngine:
             "异常提示识别 OK FeatureSet；"
             f"识别区域 {roi_mode} {roi_width}×{roi_height}；"
             f"轮询 {config.poll_interval_ms} ms；"
-            f"临时错误重试 {config.runtime_error_retry_count} 次{pixel_detail}。"
+            f"临时错误重试 {config.runtime_error_retry_count} 次；"
+            f"W/S 恢复上限 {config.recovery_attempt_limit} 次{pixel_detail}。"
         )
         if config.capture_mode == "window":
             backend = "OK WGC" if config.window_backend == "ok" else "PrintWindow"
@@ -2820,6 +2834,18 @@ class FishingEngine:
             monitoring=False,
         )
         return True
+
+    def _stop_after_recovery_limit(self, recovery_limit: int) -> None:
+        attempts = self._recovery_attempts_without_success
+        self._interrupt_generation += 1
+        self._enabled.clear()
+        self._reset_detection()
+        self._emit(
+            EventKind.ERROR,
+            f"连续 W → S 恢复 {attempts} 次（上限 {recovery_limit} 次）仍未进入等待上钩状态，"
+            "可能已经离开钓鱼区域。监测已停止；请回到钓鱼点后重新校准并按 F8。",
+            monitoring=False,
+        )
     def _cancel_pending_recast(self) -> None:
         self._waiting_for_clear = False
         self._fish_resolution_pending = False

@@ -904,6 +904,7 @@ class MainWindow(QMainWindow):
         self.recovery_cooldown_spin = self._spin_box(
             1000, 10000, 4500, " ms"
         )
+        self.recovery_attempt_limit_spin = self._spin_box(1, 20, 5, " 次")
         recovery_controls = [
             (
                 "W / S 按住时间",
@@ -915,12 +916,19 @@ class MainWindow(QMainWindow):
                 "避免持续失效时反复移动",
                 self.recovery_cooldown_spin,
             ),
+            (
+                "W/S 恢复上限",
+                "连续失败达到上限后停止监测",
+                self.recovery_attempt_limit_spin,
+            ),
         ]
-        for column, (label, hint, control) in enumerate(recovery_controls):
+        for index, (label, hint, control) in enumerate(recovery_controls):
+            row = (index // 2) * 2
+            column = index % 2
             recovery_grid.addWidget(
-                self._form_label(label, hint), 0, column
+                self._form_label(label, hint), row, column
             )
-            recovery_grid.addWidget(control, 1, column)
+            recovery_grid.addWidget(control, row + 1, column)
             recovery_grid.setColumnStretch(column, 1)
         recovery_layout.addLayout(recovery_grid)
         layout.addWidget(recovery_card)
@@ -1036,8 +1044,8 @@ class MainWindow(QMainWindow):
             ("恢复确认", "图标消失后重新待命", self.clear_spin),
             ("按键冷却", "避免重复发送按键", self.cooldown_spin),
             (
-                "异常重试次数",
-                "0 表示发生异常后立即暂停",
+                "临时错误重试",
+                "仅用于截图、窗口或识别循环异常",
                 self.runtime_retry_spin,
             ),
         ]
@@ -1508,6 +1516,7 @@ class MainWindow(QMainWindow):
             self.idle_max_spin,
             self.recovery_hold_spin,
             self.recovery_cooldown_spin,
+            self.recovery_attempt_limit_spin,
             self.github_auto_check,
         ]
         blockers = [QSignalBlocker(control) for control in controls]
@@ -1541,6 +1550,7 @@ class MainWindow(QMainWindow):
         self.idle_max_spin.setValue(config.idle_red_pixel_max)
         self.recovery_hold_spin.setValue(config.recovery_key_hold_ms)
         self.recovery_cooldown_spin.setValue(config.recovery_cooldown_ms)
+        self.recovery_attempt_limit_spin.setValue(config.recovery_attempt_limit)
         self.github_auto_check.setChecked(config.github_auto_check)
         del blockers
         self._sync_target_mode_controls()
@@ -1609,6 +1619,9 @@ class MainWindow(QMainWindow):
         )
         self.recovery_cooldown_spin.valueChanged.connect(
             lambda value: self.engine.update_config(recovery_cooldown_ms=value)
+        )
+        self.recovery_attempt_limit_spin.valueChanged.connect(
+            lambda value: self.engine.update_config(recovery_attempt_limit=value)
         )
         self.restore_button.clicked.connect(self._restore_recommended_settings)
 
@@ -1758,6 +1771,7 @@ class MainWindow(QMainWindow):
             recovery_key_hold_ms=defaults.recovery_key_hold_ms,
             recovery_pause_ms=defaults.recovery_pause_ms,
             recovery_cooldown_ms=defaults.recovery_cooldown_ms,
+            recovery_attempt_limit=defaults.recovery_attempt_limit,
             catch_strategy=defaults.catch_strategy,
             fallback_collect_delay_seconds=defaults.fallback_collect_delay_seconds,
             fixed_delay_latest_collect_seconds=(
