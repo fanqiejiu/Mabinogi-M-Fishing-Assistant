@@ -489,6 +489,43 @@ class FishingEngineTests(unittest.TestCase):
         self.assertEqual(press.call_args_list[0].args, ("space",))
         self.assertEqual(press.call_args_list[1].args, ("space",))
 
+    def test_ready_icon_after_collect_recasts_on_first_frame(self) -> None:
+        config = AppConfig(
+            catch_strategy="fixed_delay",
+            fallback_collect_delay_seconds=0,
+            trigger_consecutive_frames=1,
+            clear_consecutive_frames=8,
+            recovery_consecutive_frames=1,
+            recovery_cooldown_ms=0,
+            press_cooldown_ms=0,
+        )
+        engine = FishingEngine()
+        with patch.object(engine, "_press_key") as press, patch.object(
+            engine, "_recover_idle_state"
+        ) as recover:
+            engine._process_frame(1985, config, IconState.FISH_HOOKED)
+            engine._process_frame(1985, config, IconState.FISH_HOOKED)
+            self.assertEqual(press.call_count, 1)
+
+            # 明确的可抛竿图标无需等满 8 个清空帧，也不应先执行 W/S。
+            engine._process_frame(766, config, IconState.READY_TO_CAST)
+
+        self.assertEqual(press.call_count, 2)
+        recover.assert_not_called()
+        self.assertFalse(engine._waiting_for_clear)  # type: ignore[attr-defined]
+
+    def test_ambiguous_frame_after_collect_still_uses_clear_confirmation(self) -> None:
+        config = AppConfig(clear_consecutive_frames=3, press_cooldown_ms=0)
+        engine = FishingEngine()
+        engine._waiting_for_clear = True  # type: ignore[attr-defined]
+
+        with patch.object(engine, "_press_key") as press:
+            engine._process_frame(0, config, IconState.NORMAL)
+
+        press.assert_not_called()
+        self.assertTrue(engine._waiting_for_clear)  # type: ignore[attr-defined]
+        self.assertIsNone(engine._pending_recast_at)  # type: ignore[attr-defined]
+
     def test_fixed_delay_latest_deadline_limits_long_wait(self) -> None:
         config = AppConfig(
             catch_strategy="fixed_delay",

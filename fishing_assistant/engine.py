@@ -2146,7 +2146,14 @@ class FishingEngine:
                 self._finish_escape_watch(now, config)
 
         if self._waiting_for_clear:
-            if self._clear_frames >= config.clear_consecutive_frames:
+            # 收杆后游戏会短暂直接恢复“可抛竿”图标。它是比普通清空帧
+            # 更强的正向证据：首帧命中就立即续钓，避免 OK 全尺度扫描较慢
+            # 时错过短暂图标，随后误等到指南针并执行不必要的 W → S。
+            if icon_state == IconState.READY_TO_CAST:
+                self._waiting_for_clear = False
+                self._clear_frames = 0
+                self._schedule_recast(now, config, "收鱼完成，钓鱼图标已恢复")
+            elif self._clear_frames >= config.clear_consecutive_frames:
                 self._waiting_for_clear = False
                 self._schedule_recast(now, config, "收鱼完成")
         elif self._fish_resolution_pending:
