@@ -2285,6 +2285,10 @@ class FishingEngine:
         return "stamina_bounce"
 
     @staticmethod
+    def _recovery_movement_mode(config: AppConfig) -> str:
+        return "w_only" if config.recovery_movement_mode == "w_only" else "ws"
+
+    @staticmethod
     def fixed_delay_timing(config: AppConfig) -> tuple[float, float, float]:
         """返回模式二的等待、最迟拉钩和实际执行秒数。"""
         wait_seconds = max(0.0, float(config.fallback_collect_delay_seconds))
@@ -2322,22 +2326,29 @@ class FishingEngine:
                 pass
         roi_width, roi_height = effective_roi_size(config, source_resolution)
         roi_mode = "自动" if config.auto_scale_roi else "手动"
-        forward_compensation = (
-            "关闭"
-            if config.recovery_forward_compensation_interval <= 0
-            else (
-                f"每 {config.recovery_forward_compensation_interval} 次恢复"
-                f"补按 W {config.recovery_forward_compensation_taps} 次"
+        if self._recovery_movement_mode(config) == "w_only":
+            recovery_detail = (
+                f"仅 W {config.recovery_w_only_count} 次 × "
+                f"{config.recovery_w_only_hold_seconds:.1f} 秒"
             )
-        )
+        else:
+            forward_compensation = (
+                "关闭"
+                if config.recovery_forward_compensation_interval <= 0
+                else (
+                    f"每 {config.recovery_forward_compensation_interval} 次恢复"
+                    f"补按 W {config.recovery_forward_compensation_taps} 次"
+                )
+            )
+            recovery_detail = f"W → S；向前补偿 {forward_compensation}"
         common = (
             f"策略 {strategy}；图标识别 {icon_recognizer}；"
             "异常提示识别 OK FeatureSet；"
             f"识别区域 {roi_mode} {roi_width}×{roi_height}；"
             f"轮询 {config.poll_interval_ms} ms；"
             f"临时错误重试 {config.runtime_error_retry_count} 次；"
-            f"W/S 恢复上限 {config.recovery_attempt_limit} 次；"
-            f"向前补偿 {forward_compensation}{pixel_detail}。"
+            f"移动恢复 {recovery_detail}；"
+            f"恢复上限 {config.recovery_attempt_limit} 次{pixel_detail}。"
         )
         if config.capture_mode == "window":
             backend = "OK WGC" if config.window_backend == "ok" else "PrintWindow"
@@ -2838,7 +2849,7 @@ class FishingEngine:
         self._emit(
             EventKind.ERROR,
             detail
-            + f"本轮自动抛竿 {cast_attempts} 次，W → S 恢复 {recovery_attempts} 次，"
+            + f"本轮自动抛竿 {cast_attempts} 次，移动恢复 {recovery_attempts} 次，"
             + f"OK 特征相似度 {confidence:.3f}。",
             monitoring=False,
         )
@@ -2851,7 +2862,7 @@ class FishingEngine:
         self._reset_detection()
         self._emit(
             EventKind.ERROR,
-            f"连续 W → S 恢复 {attempts} 次（上限 {recovery_limit} 次）仍未进入等待上钩状态，"
+            f"连续移动恢复 {attempts} 次（上限 {recovery_limit} 次）仍未进入等待上钩状态，"
             "可能已经离开钓鱼区域。监测已停止；请回到钓鱼点后重新校准并按 F8。",
             monitoring=False,
         )
@@ -2904,7 +2915,7 @@ class FishingEngine:
     def _recover_idle_state(
         self, config: AppConfig, *, startup: bool = False
     ) -> None:
-        """识别到指南针时短按 W 再 S，刷新开始钓鱼图标。"""
+        """识别到指南针时按所选方式移动，刷新开始钓鱼图标。"""
         self._last_recovery_at = time.monotonic()
         self._idle_frames = 0
         was_enabled = self._enabled.is_set()
@@ -2918,62 +2929,95 @@ class FishingEngine:
                 or generation != self._interrupt_generation
             )
 
-        self._tap_key("w", config.recovery_key_hold_ms, config)
-        time.sleep(config.recovery_pause_ms / 1000)
-        if interrupted():
-            # Esc / 暂停必须是可靠的送键取消边界：W 之后的停顿期间
-            # 被停止时，不再补送 S（焦点可能已切到其他程序）。
-            self._emit(
-                EventKind.WARNING, "恢复序列已被停止中断，未发送后续按键。"
-            )
-            return
-        self._tap_key("s", config.recovery_key_hold_ms, config)
-        if interrupted():
-            self._emit(
-                EventKind.WARNING,
-                "恢复序列已被停止中断，已取消向前补偿。",
-            )
-            return
-        self._recovery_attempts_without_success += 1
+        mode = self._recovery_movement_mode(config)
         compensation_taps = 0
-        compensation_interval = max(
-            0, min(20, int(config.recovery_forward_compensation_interval))
-        )
-        configured_taps = max(
-            1, min(10, int(config.recovery_forward_compensation_taps))
-        )
-        if (
-            compensation_interval > 0
-            and self._recovery_attempts_without_success % compensation_interval == 0
-        ):
-            for _tap_index in range(configured_taps):
-                time.sleep(config.recovery_pause_ms / 1000)
+        if mode == "w_only":
+            w_only_count = max(1, min(20, int(config.recovery_w_only_count)))
+            w_only_hold_seconds = max(
+                0.1, min(5.0, float(config.recovery_w_only_hold_seconds))
+            )
+            w_only_hold_ms = round(w_only_hold_seconds * 1000)
+            for tap_index in range(w_only_count):
+                if tap_index:
+                    time.sleep(config.recovery_pause_ms / 1000)
+                    if interrupted():
+                        self._emit(
+                            EventKind.WARNING,
+                            "仅 W 恢复已被停止中断，未发送后续 W。",
+                        )
+                        return
+                self._tap_key("w", w_only_hold_ms, config)
                 if interrupted():
                     self._emit(
                         EventKind.WARNING,
-                        "向前补偿序列已被停止中断，未发送后续 W。",
+                        "仅 W 恢复已被停止中断，未发送后续 W。",
                     )
                     return
-                self._tap_key("w", config.recovery_key_hold_ms, config)
-                compensation_taps += 1
-                if interrupted():
-                    self._emit(
-                        EventKind.WARNING,
-                        "向前补偿序列已被停止中断，未发送后续 W。",
-                    )
-                    return
+            self._recovery_attempts_without_success += 1
+            message = (
+                "启动时识别到指南针图标，"
+                if startup
+                else "检测到指南针状态，"
+            )
+            message += (
+                f"已仅按 W {w_only_count} 次，每次长按 {w_only_hold_seconds:.1f} 秒。"
+            )
+        else:
+            self._tap_key("w", config.recovery_key_hold_ms, config)
+            time.sleep(config.recovery_pause_ms / 1000)
+            if interrupted():
+                # Esc / 暂停必须是可靠的送键取消边界：W 之后的停顿期间
+                # 被停止时，不再补送 S（焦点可能已切到其他程序）。
+                self._emit(
+                    EventKind.WARNING, "恢复序列已被停止中断，未发送后续按键。"
+                )
+                return
+            self._tap_key("s", config.recovery_key_hold_ms, config)
+            if interrupted():
+                self._emit(
+                    EventKind.WARNING,
+                    "恢复序列已被停止中断，已取消向前补偿。",
+                )
+                return
+            self._recovery_attempts_without_success += 1
+            compensation_interval = max(
+                0, min(20, int(config.recovery_forward_compensation_interval))
+            )
+            configured_taps = max(
+                1, min(10, int(config.recovery_forward_compensation_taps))
+            )
+            if (
+                compensation_interval > 0
+                and self._recovery_attempts_without_success % compensation_interval == 0
+            ):
+                for _tap_index in range(configured_taps):
+                    time.sleep(config.recovery_pause_ms / 1000)
+                    if interrupted():
+                        self._emit(
+                            EventKind.WARNING,
+                            "向前补偿序列已被停止中断，未发送后续 W。",
+                        )
+                        return
+                    self._tap_key("w", config.recovery_key_hold_ms, config)
+                    compensation_taps += 1
+                    if interrupted():
+                        self._emit(
+                            EventKind.WARNING,
+                            "向前补偿序列已被停止中断，未发送后续 W。",
+                        )
+                        return
+            message = (
+                "启动时识别到指南针图标，已执行 W → S 移动恢复。"
+                if startup
+                else "检测到指南针状态，已执行 W → S 移动恢复。"
+            )
+            if compensation_taps:
+                message = (
+                    f"{message[:-1]}；第 {self._recovery_attempts_without_success} 次恢复"
+                    f"已额外短按 W {compensation_taps} 次进行向前补偿。"
+                )
         if config.capture_mode == "window" and config.auto_resume_fishing:
             self._refresh_hover_before_recast = True
-        message = (
-            "启动时识别到指南针图标，已执行 W → S 移动恢复。"
-            if startup
-            else "检测到指南针状态，已执行 W → S 移动恢复。"
-        )
-        if compensation_taps:
-            message = (
-                f"{message[:-1]}；第 {self._recovery_attempts_without_success} 次恢复"
-                f"已额外短按 W {compensation_taps} 次进行向前补偿。"
-            )
         self._emit(EventKind.SUCCESS, message, monitoring=True)
         self._announce_blocking_message_scan_if_needed()
 
@@ -3037,7 +3081,7 @@ class FishingEngine:
         self._last_background_hover_at = time.monotonic()
         self._emit(
             EventKind.INFO,
-            "W → S 后已刷新后台虚拟悬停，准备发送 Space。",
+            "移动恢复后已刷新后台虚拟悬停，准备发送 Space。",
             monitoring=True,
         )
 

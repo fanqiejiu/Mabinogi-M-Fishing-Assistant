@@ -94,6 +94,29 @@ class UiRegressionTests(unittest.TestCase):
         owner._show_update_dialog.assert_called_once_with(result)
         owner.open_release_button.setEnabled.assert_called_with(True)
 
+    def test_recovery_mode_switches_parameter_panel_and_checkbox_text(self) -> None:
+        owner = SimpleNamespace(
+            recovery_mode_combo=MagicMock(),
+            recovery_mode_stack=MagicMock(),
+            auto_recover_check=MagicMock(),
+        )
+        owner.recovery_mode_combo.currentData.return_value = "w_only"
+
+        MainWindow._sync_recovery_mode_controls(owner)  # type: ignore[arg-type]
+
+        owner.recovery_mode_stack.setCurrentIndex.assert_called_with(1)
+        owner.auto_recover_check.setText.assert_called_with(
+            "检测到指南针状态时仅按 W 向前恢复"
+        )
+
+        owner.recovery_mode_combo.currentData.return_value = "ws"
+        MainWindow._sync_recovery_mode_controls(owner)  # type: ignore[arg-type]
+
+        owner.recovery_mode_stack.setCurrentIndex.assert_called_with(0)
+        owner.auto_recover_check.setText.assert_called_with(
+            "检测到指南针状态时自动执行 W → S"
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

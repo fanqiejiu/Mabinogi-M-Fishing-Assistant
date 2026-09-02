@@ -885,21 +885,29 @@ class MainWindow(QMainWindow):
         recovery_layout.addLayout(
             self._card_heading(
                 "自动恢复与续钓",
-                "指南针出现时执行 W → S；钓鱼图标恢复后自动按 Space。",
+                "指南针出现时按所选方式移动；钓鱼图标恢复后自动按 Space。",
             )
         )
         self.auto_resume_check = QCheckBox(
             "收鱼后自动按 Space 继续钓鱼"
         )
         self.auto_recover_check = QCheckBox(
-            "检测到指南针状态时自动执行 W → S"
+            "检测到指南针状态时自动移动恢复"
         )
         recovery_layout.addWidget(self.auto_resume_check)
         recovery_layout.addWidget(self.auto_recover_check)
 
-        recovery_grid = QGridLayout()
-        recovery_grid.setHorizontalSpacing(16)
-        recovery_grid.setVerticalSpacing(10)
+        self.recovery_mode_combo = ScrollSafeComboBox()
+        self.recovery_mode_combo.addItem("W → S 往返恢复", "ws")
+        self.recovery_mode_combo.addItem("仅按 W 向前恢复", "w_only")
+        recovery_layout.addWidget(
+            self._form_label(
+                "恢复方式",
+                "W/S 适合原地刷新；仅 W 适合需要持续向岸边方向移动的情况。",
+            )
+        )
+        recovery_layout.addWidget(self.recovery_mode_combo)
+
         self.recovery_hold_spin = self._spin_box(80, 600, 180, " ms")
         self.recovery_cooldown_spin = self._spin_box(
             1000, 10000, 4500, " ms"
@@ -907,42 +915,96 @@ class MainWindow(QMainWindow):
         self.recovery_attempt_limit_spin = self._spin_box(1, 20, 5, " 次")
         self.recovery_forward_interval_spin = self._spin_box(0, 20, 2, " 次")
         self.recovery_forward_taps_spin = self._spin_box(1, 10, 1, " 次")
-        recovery_controls = [
-            (
-                "W / S 按住时间",
-                "每个方向的短按时长",
-                self.recovery_hold_spin,
-            ),
-            (
-                "恢复冷却",
-                "避免持续失效时反复移动",
-                self.recovery_cooldown_spin,
-            ),
-            (
-                "W/S 恢复上限",
-                "连续失败达到上限后停止监测",
-                self.recovery_attempt_limit_spin,
-            ),
-            (
-                "向前补偿周期",
-                "每累计几次 W→S 后触发；0 为关闭",
-                self.recovery_forward_interval_spin,
-            ),
-            (
-                "补按 W 次数",
-                "触发时额外连续短按 W",
-                self.recovery_forward_taps_spin,
-            ),
-        ]
-        for index, (label, hint, control) in enumerate(recovery_controls):
-            row = (index // 2) * 2
-            column = index % 2
-            recovery_grid.addWidget(
-                self._form_label(label, hint), row, column
+        self.recovery_w_only_count_spin = self._spin_box(1, 20, 1, " 次")
+        self.recovery_w_only_hold_spin = self._double_spin_box(
+            0.1, 5.0, 0.5, " 秒"
+        )
+
+        def recovery_control_grid(
+            controls: list[tuple[str, str, QWidget]],
+        ) -> QWidget:
+            container = QWidget()
+            grid = QGridLayout(container)
+            grid.setContentsMargins(0, 0, 0, 0)
+            grid.setHorizontalSpacing(14)
+            grid.setVerticalSpacing(8)
+            for index, (label, hint, control) in enumerate(controls):
+                row = (index // 2) * 2
+                column = index % 2
+                grid.addWidget(self._form_label(label, hint), row, column)
+                grid.addWidget(control, row + 1, column)
+                grid.setColumnStretch(column, 1)
+            return container
+
+        ws_panel = option_panel(
+            "W → S 模式参数",
+            "先短按 W 再短按 S；连续失败时可按周期额外补按 W。",
+        )
+        ws_panel.layout().addWidget(
+            recovery_control_grid(
+                [
+                    (
+                        "W / S 按住时间",
+                        "每个方向的短按时长",
+                        self.recovery_hold_spin,
+                    ),
+                    (
+                        "向前补偿周期",
+                        "每累计几次 W→S 后触发；0 为关闭",
+                        self.recovery_forward_interval_spin,
+                    ),
+                    (
+                        "补按 W 次数",
+                        "触发时额外连续短按 W",
+                        self.recovery_forward_taps_spin,
+                    ),
+                ]
             )
-            recovery_grid.addWidget(control, row + 1, column)
-            recovery_grid.setColumnStretch(column, 1)
-        recovery_layout.addLayout(recovery_grid)
+        )
+        w_only_panel = option_panel(
+            "仅 W 模式参数",
+            "每轮只发送 W，不发送 S；每次 W 都使用下方长按时间。",
+        )
+        w_only_panel.layout().addWidget(
+            recovery_control_grid(
+                [
+                    (
+                        "连续按 W 次数",
+                        "每轮移动恢复执行几次 W",
+                        self.recovery_w_only_count_spin,
+                    ),
+                    (
+                        "每次长按时间",
+                        "单次 W 持续 0.1–5.0 秒",
+                        self.recovery_w_only_hold_spin,
+                    ),
+                ]
+            )
+        )
+        self.recovery_mode_stack = QStackedWidget()
+        self.recovery_mode_stack.addWidget(ws_panel)
+        self.recovery_mode_stack.addWidget(w_only_panel)
+        recovery_layout.addWidget(self.recovery_mode_stack)
+
+        recovery_layout.addWidget(
+            self._form_label("通用恢复设置", "两种恢复方式共用冷却和失败上限。")
+        )
+        recovery_layout.addWidget(
+            recovery_control_grid(
+                [
+                    (
+                        "恢复冷却",
+                        "避免持续失效时反复移动",
+                        self.recovery_cooldown_spin,
+                    ),
+                    (
+                        "恢复上限",
+                        "连续失败达到上限后停止监测",
+                        self.recovery_attempt_limit_spin,
+                    ),
+                ]
+            )
+        )
         layout.addWidget(recovery_card)
         layout.addStretch(1)
         scroll.setWidget(canvas)
@@ -1524,6 +1586,7 @@ class MainWindow(QMainWindow):
             self.stamina_zoom_spin,
             self.auto_resume_check,
             self.auto_recover_check,
+            self.recovery_mode_combo,
             self.idle_min_spin,
             self.idle_max_spin,
             self.recovery_hold_spin,
@@ -1531,6 +1594,8 @@ class MainWindow(QMainWindow):
             self.recovery_attempt_limit_spin,
             self.recovery_forward_interval_spin,
             self.recovery_forward_taps_spin,
+            self.recovery_w_only_count_spin,
+            self.recovery_w_only_hold_spin,
             self.github_auto_check,
         ]
         blockers = [QSignalBlocker(control) for control in controls]
@@ -1560,6 +1625,9 @@ class MainWindow(QMainWindow):
         self.stamina_zoom_spin.setValue(config.stamina_zoom_in_steps)
         self.auto_resume_check.setChecked(config.auto_resume_fishing)
         self.auto_recover_check.setChecked(config.auto_recover_idle)
+        self._select_combo_data(
+            self.recovery_mode_combo, config.recovery_movement_mode
+        )
         self.idle_min_spin.setValue(config.idle_red_pixel_min)
         self.idle_max_spin.setValue(config.idle_red_pixel_max)
         self.recovery_hold_spin.setValue(config.recovery_key_hold_ms)
@@ -1571,11 +1639,16 @@ class MainWindow(QMainWindow):
         self.recovery_forward_taps_spin.setValue(
             config.recovery_forward_compensation_taps
         )
+        self.recovery_w_only_count_spin.setValue(config.recovery_w_only_count)
+        self.recovery_w_only_hold_spin.setValue(
+            config.recovery_w_only_hold_seconds
+        )
         self.github_auto_check.setChecked(config.github_auto_check)
         del blockers
         self._sync_target_mode_controls()
         self._sync_auto_roi_controls()
         self._sync_catch_strategy_controls()
+        self._sync_recovery_mode_controls()
         self._sync_recognition_backend_controls()
         self._refresh_threshold_display(config.fish_red_pixel_threshold)
     def _connect_controls(self) -> None:
@@ -1628,6 +1701,9 @@ class MainWindow(QMainWindow):
         self.auto_recover_check.toggled.connect(
             lambda checked: self.engine.update_config(auto_recover_idle=checked)
         )
+        self.recovery_mode_combo.currentIndexChanged.connect(
+            self._recovery_mode_changed
+        )
         self.idle_min_spin.valueChanged.connect(
             lambda value: self.engine.update_config(idle_red_pixel_min=value)
         )
@@ -1653,6 +1729,14 @@ class MainWindow(QMainWindow):
                 recovery_forward_compensation_taps=value
             )
         )
+        self.recovery_w_only_count_spin.valueChanged.connect(
+            lambda value: self.engine.update_config(recovery_w_only_count=value)
+        )
+        self.recovery_w_only_hold_spin.valueChanged.connect(
+            lambda value: self.engine.update_config(
+                recovery_w_only_hold_seconds=float(value)
+            )
+        )
         self.restore_button.clicked.connect(self._restore_recommended_settings)
 
         self.check_update_button.clicked.connect(lambda: self._check_for_updates(manual=True))
@@ -1665,6 +1749,20 @@ class MainWindow(QMainWindow):
     def _catch_strategy_changed(self) -> None:
         self.engine.update_config(catch_strategy=str(self.catch_strategy_combo.currentData()))
         self._sync_catch_strategy_controls()
+
+    def _recovery_mode_changed(self) -> None:
+        mode = str(self.recovery_mode_combo.currentData())
+        self.engine.update_config(recovery_movement_mode=mode)
+        self._sync_recovery_mode_controls()
+
+    def _sync_recovery_mode_controls(self) -> None:
+        mode = str(self.recovery_mode_combo.currentData())
+        self.recovery_mode_stack.setCurrentIndex(1 if mode == "w_only" else 0)
+        self.auto_recover_check.setText(
+            "检测到指南针状态时仅按 W 向前恢复"
+            if mode == "w_only"
+            else "检测到指南针状态时自动执行 W → S"
+        )
 
     def _fallback_delay_changed(self, value: float) -> None:
         self.engine.update_config(
@@ -1808,6 +1906,9 @@ class MainWindow(QMainWindow):
             recovery_forward_compensation_taps=(
                 defaults.recovery_forward_compensation_taps
             ),
+            recovery_movement_mode=defaults.recovery_movement_mode,
+            recovery_w_only_count=defaults.recovery_w_only_count,
+            recovery_w_only_hold_seconds=defaults.recovery_w_only_hold_seconds,
             catch_strategy=defaults.catch_strategy,
             fallback_collect_delay_seconds=defaults.fallback_collect_delay_seconds,
             fixed_delay_latest_collect_seconds=(
