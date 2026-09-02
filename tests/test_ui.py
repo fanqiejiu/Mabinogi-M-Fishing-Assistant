@@ -5,11 +5,11 @@ from __future__ import annotations
 import os
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication, QLabel, QTextBrowser
+from PySide6.QtWidgets import QApplication, QDialog, QLabel, QTextBrowser
 
 from fishing_assistant.ui import (
     MainWindow,
@@ -18,6 +18,7 @@ from fishing_assistant.ui import (
     ScrollSafeSlider,
     ScrollSafeSpinBox,
     UpdateAvailableDialog,
+    WOnlyModeWarningDialog,
 )
 from fishing_assistant.updates import UpdateResult
 
@@ -115,6 +116,86 @@ class UiRegressionTests(unittest.TestCase):
         owner.recovery_mode_stack.setCurrentIndex.assert_called_with(0)
         owner.auto_recover_check.setText.assert_called_with(
             "检测到指南针状态时自动执行 W → S"
+        )
+
+    def test_pixel_fish_threshold_only_shows_in_pixel_mode(self) -> None:
+        owner = SimpleNamespace(
+            recognition_backend_combo=MagicMock(),
+            pixel_fish_threshold_panel=MagicMock(),
+            threshold_header_label=MagicMock(),
+            threshold_value=MagicMock(),
+            threshold_slider=MagicMock(),
+            idle_min_spin=MagicMock(),
+            idle_max_spin=MagicMock(),
+            recognition_backend_hint=MagicMock(),
+            red_metric=SimpleNamespace(
+                caption_label=MagicMock(),
+                value_label=MagicMock(),
+            ),
+            red_progress=MagicMock(),
+            engine=MagicMock(),
+        )
+        owner.engine.config.return_value = SimpleNamespace(
+            fish_red_pixel_threshold=1200
+        )
+        owner.recognition_backend_combo.currentData.return_value = "ok"
+
+        MainWindow._sync_recognition_backend_controls(owner)  # type: ignore[arg-type]
+
+        owner.pixel_fish_threshold_panel.setVisible.assert_called_with(False)
+
+        owner.recognition_backend_combo.currentData.return_value = "pixel"
+        MainWindow._sync_recognition_backend_controls(owner)  # type: ignore[arg-type]
+
+        owner.pixel_fish_threshold_panel.setVisible.assert_called_with(True)
+        owner.threshold_slider.setEnabled.assert_called_with(True)
+
+    def test_w_only_warning_requires_acknowledgement(self) -> None:
+        dialog = WOnlyModeWarningDialog()
+        try:
+            self.assertTrue(dialog.isModal())
+            self.assertFalse(dialog.confirm_button.isEnabled())
+            dialog.acknowledge_check.setChecked(True)
+            self.assertTrue(dialog.confirm_button.isEnabled())
+        finally:
+            dialog.close()
+
+    def test_cancelled_w_only_switch_returns_to_default_ws(self) -> None:
+        combo = ScrollSafeComboBox()
+        combo.addItem("W → S", "ws")
+        combo.addItem("仅 W", "w_only")
+        combo.setCurrentIndex(1)
+        owner = SimpleNamespace(
+            recovery_mode_combo=combo,
+            engine=MagicMock(),
+            _sync_recovery_mode_controls=MagicMock(),
+        )
+        with patch("fishing_assistant.ui.WOnlyModeWarningDialog") as dialog_type:
+            dialog_type.return_value.exec.return_value = QDialog.DialogCode.Rejected
+            MainWindow._recovery_mode_changed(owner)  # type: ignore[arg-type]
+
+        self.assertEqual(combo.currentData(), "ws")
+        owner.engine.update_config.assert_called_once_with(
+            recovery_movement_mode="ws"
+        )
+
+    def test_acknowledged_w_only_switch_is_saved(self) -> None:
+        combo = ScrollSafeComboBox()
+        combo.addItem("W → S", "ws")
+        combo.addItem("仅 W", "w_only")
+        combo.setCurrentIndex(1)
+        owner = SimpleNamespace(
+            recovery_mode_combo=combo,
+            engine=MagicMock(),
+            _sync_recovery_mode_controls=MagicMock(),
+        )
+        with patch("fishing_assistant.ui.WOnlyModeWarningDialog") as dialog_type:
+            dialog_type.return_value.exec.return_value = QDialog.DialogCode.Accepted
+            MainWindow._recovery_mode_changed(owner)  # type: ignore[arg-type]
+
+        self.assertEqual(combo.currentData(), "w_only")
+        owner.engine.update_config.assert_called_once_with(
+            recovery_movement_mode="w_only"
         )
 
 

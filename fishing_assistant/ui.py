@@ -331,6 +331,59 @@ class UpdateAvailableDialog(QDialog):
         self.close()
 
 
+class WOnlyModeWarningDialog(QDialog):
+    """切换仅 W 恢复前，要求用户确认镜头和角色朝向。"""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("updateDialog")
+        self.setWindowTitle("仅 W 模式使用提醒")
+        self.setModal(True)
+        self.setMinimumWidth(410)
+        self.setMaximumWidth(460)
+        self.setSizeGripEnabled(False)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 20, 22, 18)
+        layout.setSpacing(11)
+
+        title = QLabel("启用仅按 W 向前恢复前")
+        title.setObjectName("updateDialogTitle")
+        layout.addWidget(title)
+
+        message = QLabel(
+            "请先把镜头视角调整为朝向河岸，并确认当前为角色背部视角。"
+            "方向不正确时，持续按 W 可能让角色远离钓鱼区域。"
+        )
+        message.setObjectName("cardHint")
+        message.setWordWrap(True)
+        layout.addWidget(message)
+
+        recommendation = QLabel("W → S 往返恢复是默认推荐模式。")
+        recommendation.setObjectName("helper")
+        recommendation.setWordWrap(True)
+        layout.addWidget(recommendation)
+
+        self.acknowledge_check = QCheckBox(
+            "我已知晓，并确认镜头与角色朝向正确"
+        )
+        layout.addWidget(self.acknowledge_check)
+
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        cancel_button = QPushButton("返回 W → S")
+        cancel_button.clicked.connect(self.reject)
+        actions.addWidget(cancel_button)
+        self.confirm_button = QPushButton("继续使用仅 W")
+        self.confirm_button.setObjectName("primaryButton")
+        self.confirm_button.setEnabled(False)
+        self.confirm_button.clicked.connect(self.accept)
+        actions.addWidget(self.confirm_button)
+        layout.addLayout(actions)
+
+        self.acknowledge_check.toggled.connect(self.confirm_button.setEnabled)
+
+
 class MainWindow(QMainWindow):
     """配置中心、运行状态与操作日志组成的单窗口桌面应用。"""
 
@@ -487,7 +540,6 @@ class MainWindow(QMainWindow):
         self.runtime_state_chip = QLabel("状态 · 等待校准")
         self.runtime_state_chip.setObjectName("runtimeStateChip")
         self.runtime_state_chip.setProperty("state", "idle")
-        self.runtime_state_chip.setMinimumWidth(132)
         self.runtime_state_chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.runtime_state_chip, 0, Qt.AlignmentFlag.AlignTop)
         self.theme_button = QPushButton()
@@ -496,6 +548,13 @@ class MainWindow(QMainWindow):
         self.status_chip = QLabel("●  待校准")
         self.status_chip.setObjectName("statusChip")
         self.status_chip.setProperty("state", "idle")
+        self.status_chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        for control in (
+            self.runtime_state_chip,
+            self.theme_button,
+            self.status_chip,
+        ):
+            control.setFixedSize(136, 38)
         layout.addWidget(self.status_chip, 0, Qt.AlignmentFlag.AlignTop)
         return layout
 
@@ -898,7 +957,7 @@ class MainWindow(QMainWindow):
         recovery_layout.addWidget(self.auto_recover_check)
 
         self.recovery_mode_combo = ScrollSafeComboBox()
-        self.recovery_mode_combo.addItem("W → S 往返恢复", "ws")
+        self.recovery_mode_combo.addItem("W → S 往返恢复（默认推荐）", "ws")
         self.recovery_mode_combo.addItem("仅按 W 向前恢复", "w_only")
         recovery_layout.addWidget(
             self._form_label(
@@ -1058,6 +1117,10 @@ class MainWindow(QMainWindow):
         self.threshold_value.setObjectName("metricValue")
         self.threshold_slider = ScrollSafeSlider(Qt.Orientation.Horizontal)
         self.threshold_slider.setRange(400, 3000)
+        self.pixel_fish_threshold_panel = QWidget()
+        pixel_threshold_layout = QVBoxLayout(self.pixel_fish_threshold_panel)
+        pixel_threshold_layout.setContentsMargins(0, 0, 0, 0)
+        pixel_threshold_layout.setSpacing(8)
         threshold_header = QHBoxLayout()
         self.threshold_header_label = self._form_label(
             "旧像素模式：鱼体判定阈值",
@@ -1065,8 +1128,9 @@ class MainWindow(QMainWindow):
         )
         threshold_header.addWidget(self.threshold_header_label, 1)
         threshold_header.addWidget(self.threshold_value)
-        recognition_layout.addLayout(threshold_header)
-        recognition_layout.addWidget(self.threshold_slider)
+        pixel_threshold_layout.addLayout(threshold_header)
+        pixel_threshold_layout.addWidget(self.threshold_slider)
+        recognition_layout.addWidget(self.pixel_fish_threshold_panel)
         layout.addWidget(recognition_card)
 
         region_card = Card()
@@ -1752,6 +1816,16 @@ class MainWindow(QMainWindow):
 
     def _recovery_mode_changed(self) -> None:
         mode = str(self.recovery_mode_combo.currentData())
+        if mode == "w_only":
+            dialog = WOnlyModeWarningDialog(self)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                blocker = QSignalBlocker(self.recovery_mode_combo)
+                ws_index = self.recovery_mode_combo.findData("ws")
+                self.recovery_mode_combo.setCurrentIndex(max(0, ws_index))
+                del blocker
+                self.engine.update_config(recovery_movement_mode="ws")
+                self._sync_recovery_mode_controls()
+                return
         self.engine.update_config(recovery_movement_mode=mode)
         self._sync_recovery_mode_controls()
 
@@ -1848,6 +1922,7 @@ class MainWindow(QMainWindow):
 
     def _sync_recognition_backend_controls(self) -> None:
         use_pixel = self.recognition_backend_combo.currentData() == "pixel"
+        self.pixel_fish_threshold_panel.setVisible(use_pixel)
         for control in (
             self.threshold_header_label,
             self.threshold_value,
