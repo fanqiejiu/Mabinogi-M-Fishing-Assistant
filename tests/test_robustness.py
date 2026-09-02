@@ -73,6 +73,36 @@ class ConfigRobustnessTests(unittest.TestCase):
         config = _load_raw_config(json.dumps({"schema_version": 14}))
         self.assertTrue(config.github_auto_check)
 
+    def test_floating_status_defaults_to_enabled_for_old_config(self) -> None:
+        config = _load_raw_config(json.dumps({"schema_version": 18}))
+        self.assertTrue(config.floating_status_enabled)
+
+    def test_floating_status_preference_is_respected(self) -> None:
+        config = _load_raw_config(
+            json.dumps(
+                {"schema_version": 19, "floating_status_enabled": False}
+            )
+        )
+        self.assertFalse(config.floating_status_enabled)
+
+    def test_floating_status_opacity_defaults_for_old_config(self) -> None:
+        config = _load_raw_config(json.dumps({"schema_version": 19}))
+        self.assertEqual(config.floating_status_opacity, 92)
+
+    def test_floating_status_opacity_is_clamped(self) -> None:
+        too_low = _load_raw_config(
+            json.dumps(
+                {"schema_version": 20, "floating_status_opacity": 1}
+            )
+        )
+        too_high = _load_raw_config(
+            json.dumps(
+                {"schema_version": 20, "floating_status_opacity": 999}
+            )
+        )
+        self.assertEqual(too_low.floating_status_opacity, 35)
+        self.assertEqual(too_high.floating_status_opacity, 100)
+
 
 class MonitorLoopRobustnessTests(unittest.TestCase):
     """监测线程不能因非法配置死亡，死亡时也不能假装仍在监测。"""

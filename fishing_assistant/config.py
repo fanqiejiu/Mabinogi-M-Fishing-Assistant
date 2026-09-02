@@ -73,7 +73,7 @@ def scaled_roi_size(width: int, height: int) -> tuple[int, int]:
 class AppConfig:
     """以后新增选项时，在此处加入字段即可自动兼容旧配置文件。"""
 
-    schema_version: int = 18
+    schema_version: int = 20
     button_center: tuple[int, int] | None = None
     monitor_index: int = 1
     display_mode: str = "borderless"
@@ -128,6 +128,10 @@ class AppConfig:
     target_window_handle: int = 0
     target_window_title: str = ""
     target_button_offset: tuple[int, int] | None = None
+    # 指定窗口后台模式下，主界面最小化时显示始终置顶的运行状态栏。
+    floating_status_enabled: bool = True
+    # 仅调整悬浮栏底色；文字始终保持完全不透明。
+    floating_status_opacity: int = 92
     # 更新源固定为项目仓库；是否在启动时自动检查由用户设置决定。
     github_repository: str = GITHUB_REPOSITORY
     github_auto_check: bool = True
@@ -241,6 +245,12 @@ def _config_from_raw(raw: dict) -> AppConfig:
         raw["recovery_w_only_count"] = 1
         raw["recovery_w_only_hold_seconds"] = 0.5
         raw["schema_version"] = 18
+    if int(raw.get("schema_version", 0)) < 19:
+        raw["floating_status_enabled"] = True
+        raw["schema_version"] = 19
+    if int(raw.get("schema_version", 0)) < 20:
+        raw["floating_status_opacity"] = 92
+        raw["schema_version"] = 20
     try:
         raw["fallback_collect_delay_seconds"] = float(
             raw.get("fallback_collect_delay_seconds", 5.3)
@@ -301,6 +311,16 @@ def _config_from_raw(raw: dict) -> AppConfig:
         raw["recovery_w_only_hold_seconds"] = 0.5
     if raw.get("recognition_backend") not in {"ok", "pixel"}:
         raw["recognition_backend"] = "ok"
+    raw["floating_status_enabled"] = bool(
+        raw.get("floating_status_enabled", True)
+    )
+    try:
+        raw["floating_status_opacity"] = max(
+            35,
+            min(100, int(raw.get("floating_status_opacity", 92))),
+        )
+    except (TypeError, ValueError, OverflowError):
+        raw["floating_status_opacity"] = 92
     # 更新源始终固定在项目自身仓库；是否启动时检查由用户设置决定。
     raw["github_repository"] = GITHUB_REPOSITORY
     raw["github_auto_check"] = bool(raw.get("github_auto_check", True))

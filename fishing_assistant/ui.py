@@ -6,8 +6,19 @@ import threading
 from datetime import datetime
 
 import mss
-from PySide6.QtCore import QLocale, QSignalBlocker, Qt, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QFont, QIcon, QPixmap, QWheelEvent
+from PySide6.QtCore import QEvent, QLocale, QSignalBlocker, Qt, QUrl, Signal
+from PySide6.QtGui import (
+    QColor,
+    QDesktopServices,
+    QFont,
+    QIcon,
+    QMouseEvent,
+    QPaintEvent,
+    QPainter,
+    QPen,
+    QPixmap,
+    QWheelEvent,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -218,6 +229,40 @@ QLabel#helpStep { color: #3D5774; }
 """
 
 
+FLOATING_NIGHT_STYLE = """
+QWidget#floatingStatus { background: transparent; border: none; }
+QLabel#floatingTitle { color: #F4F9FF; font-size: 12px; font-weight: 800; }
+QLabel#floatingHint { color: #718AA7; font-size: 10px; }
+QLabel#floatingState {
+    background: #142338; border: 1px solid #2D4562; border-radius: 8px;
+    color: #ADC1D8; padding: 7px 9px; font-size: 11px; font-weight: 700;
+}
+QLabel#floatingState[state="running"] {
+    background: #12352B; border-color: #287759; color: #80E7BF;
+}
+QLabel#floatingState[state="warning"] {
+    background: #3A2C14; border-color: #82631F; color: #F6CF6A;
+}
+"""
+
+
+FLOATING_DAY_STYLE = """
+QWidget#floatingStatus { background: transparent; border: none; }
+QLabel#floatingTitle { color: #172B45; font-size: 12px; font-weight: 800; }
+QLabel#floatingHint { color: #71849A; font-size: 10px; }
+QLabel#floatingState {
+    background: #F0F5FA; border: 1px solid #CEDBE8; border-radius: 8px;
+    color: #536B85; padding: 7px 9px; font-size: 11px; font-weight: 700;
+}
+QLabel#floatingState[state="running"] {
+    background: #E0F7EE; border-color: #8DDBC0; color: #187352;
+}
+QLabel#floatingState[state="warning"] {
+    background: #FFF5D8; border-color: #EDD38B; color: #86620B;
+}
+"""
+
+
 class Card(QFrame):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -384,6 +429,156 @@ class WOnlyModeWarningDialog(QDialog):
         self.acknowledge_check.toggled.connect(self.confirm_button.setEnabled)
 
 
+class FloatingStatusBar(QWidget):
+    """后台模式最小化后显示的无焦点、可拖动置顶状态栏。"""
+
+    def __init__(self) -> None:
+        super().__init__(None)
+        flags = (
+            Qt.WindowType.Tool
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.WindowDoesNotAcceptFocus
+        )
+        self.setWindowFlags(flags)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_QuitOnClose, False)
+        self.setObjectName("floatingStatus")
+        self.setWindowTitle("洛奇 M 钓鱼助手 · 后台状态")
+        self.setFixedSize(352, 82)
+        self._drag_offset = None
+        self._positioned = False
+        self._theme = "night"
+        self._background_opacity = 92
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(13, 9, 13, 11)
+        layout.setSpacing(7)
+
+        header = QHBoxLayout()
+        header.setSpacing(8)
+        title = QLabel("洛奇 M 钓鱼助手")
+        title.setObjectName("floatingTitle")
+        hint = QLabel("后台状态 · 可拖动")
+        hint.setObjectName("floatingHint")
+        hint.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        header.addWidget(title)
+        header.addStretch(1)
+        header.addWidget(hint)
+        layout.addLayout(header)
+
+        states = QHBoxLayout()
+        states.setSpacing(8)
+        self.calibration_label = QLabel("校准 · 未完成")
+        self.calibration_label.setObjectName("floatingState")
+        self.calibration_label.setProperty("state", "warning")
+        self.calibration_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.calibration_label.setFixedWidth(118)
+        self.runtime_label = QLabel("运行 · 等待校准")
+        self.runtime_label.setObjectName("floatingState")
+        self.runtime_label.setProperty("state", "idle")
+        self.runtime_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        states.addWidget(self.calibration_label)
+        states.addWidget(self.runtime_label, 1)
+        layout.addLayout(states)
+
+        for label in (title, hint, self.calibration_label, self.runtime_label):
+            label.setAttribute(
+                Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
+            )
+        self.set_theme("night")
+
+    @staticmethod
+    def _refresh_state_label(label: QLabel, state: str, text: str) -> None:
+        label.setProperty("state", state)
+        label.setText(text)
+        label.style().unpolish(label)
+        label.style().polish(label)
+
+    def set_calibrated(self, calibrated: bool) -> None:
+        self._refresh_state_label(
+            self.calibration_label,
+            "running" if calibrated else "warning",
+            "校准 · 已完成" if calibrated else "校准 · 未完成",
+        )
+
+    def set_runtime(self, text: str, state: str = "idle") -> None:
+        self._refresh_state_label(
+            self.runtime_label,
+            state,
+            f"运行 · {text}",
+        )
+        self.runtime_label.setToolTip(text)
+
+    def set_theme(self, theme: str) -> None:
+        self._theme = "day" if theme == "day" else "night"
+        self.setStyleSheet(
+            FLOATING_DAY_STYLE
+            if self._theme == "day"
+            else FLOATING_NIGHT_STYLE
+        )
+        self.update()
+
+    def set_background_opacity(self, value: int) -> None:
+        self._background_opacity = max(35, min(100, int(value)))
+        self.update()
+
+    def background_opacity(self) -> int:
+        return self._background_opacity
+
+    def paintEvent(self, event: QPaintEvent) -> None:  # noqa: N802
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        background = QColor("#EDF4FA" if self._theme == "day" else "#09111F")
+        background.setAlpha(round(255 * self._background_opacity / 100))
+        border = QColor("#91A9C1" if self._theme == "day" else "#34506F")
+        painter.setPen(QPen(border, 1))
+        painter.setBrush(background)
+        painter.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), 13, 13)
+
+    def show_at_default_position(self) -> None:
+        if not self._positioned:
+            screen = QApplication.primaryScreen()
+            if screen is not None:
+                area = screen.availableGeometry()
+                self.move(
+                    area.right() - self.width() - 18,
+                    area.top() + 18,
+                )
+            self._positioned = True
+        self.show()
+        self.raise_()
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_offset = (
+                event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            )
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if (
+            self._drag_offset is not None
+            and event.buttons() & Qt.MouseButton.LeftButton
+        ):
+            self.move(event.globalPosition().toPoint() - self._drag_offset)
+            self._positioned = True
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_offset = None
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
 class MainWindow(QMainWindow):
     """配置中心、运行状态与操作日志组成的单窗口桌面应用。"""
 
@@ -411,6 +606,7 @@ class MainWindow(QMainWindow):
         self._notified_release_version: str | None = None
         self._update_dialog: UpdateAvailableDialog | None = None
         self._auto_detected_game_window: window_target.WindowInfo | None = None
+        self.floating_status_bar = FloatingStatusBar()
 
         self.setWindowTitle(APP_NAME)
         if APP_ICON_PATH.exists():
@@ -1322,6 +1518,60 @@ class MainWindow(QMainWindow):
         ok_credit.setWordWrap(True)
         identity_layout.addWidget(ok_credit)
         layout.addWidget(identity)
+
+        floating_card = Card()
+        floating_layout = QVBoxLayout(floating_card)
+        floating_layout.setContentsMargins(24, 22, 24, 22)
+        floating_layout.setSpacing(11)
+        floating_layout.addLayout(
+            self._card_heading(
+                "后台悬浮状态栏",
+                "使用指定窗口后台模式时，主界面最小化后显示校准和运行状态。",
+            )
+        )
+        self.floating_status_check = QCheckBox(
+            "最小化后显示始终置顶的状态栏"
+        )
+        self.floating_status_check.setChecked(True)
+        floating_layout.addWidget(self.floating_status_check)
+
+        self.floating_opacity_panel = QWidget()
+        opacity_layout = QVBoxLayout(self.floating_opacity_panel)
+        opacity_layout.setContentsMargins(0, 2, 0, 2)
+        opacity_layout.setSpacing(7)
+        opacity_header = QHBoxLayout()
+        opacity_title = QLabel("背景不透明度")
+        opacity_title.setObjectName("formLabel")
+        self.floating_opacity_value = QLabel("92%")
+        self.floating_opacity_value.setObjectName("helper")
+        opacity_header.addWidget(opacity_title)
+        opacity_header.addStretch(1)
+        opacity_header.addWidget(self.floating_opacity_value)
+        opacity_layout.addLayout(opacity_header)
+        self.floating_opacity_slider = ScrollSafeSlider(
+            Qt.Orientation.Horizontal
+        )
+        self.floating_opacity_slider.setRange(35, 100)
+        self.floating_opacity_slider.setSingleStep(1)
+        self.floating_opacity_slider.setPageStep(5)
+        self.floating_opacity_slider.setValue(92)
+        self.floating_opacity_slider.setToolTip(
+            "只调整悬浮栏底色，文字和状态颜色不会变淡"
+        )
+        opacity_layout.addWidget(self.floating_opacity_slider)
+        opacity_hint = QLabel("数值越高背景越实；文字始终保持清晰。")
+        opacity_hint.setObjectName("helper")
+        opacity_layout.addWidget(opacity_hint)
+        floating_layout.addWidget(self.floating_opacity_panel)
+
+        floating_hint = QLabel(
+            "状态栏不会抢占当前程序焦点，可拖动到不遮挡游戏的位置；恢复助手窗口后会自动隐藏。"
+            "其他游戏若使用独占全屏，Windows 可能覆盖普通置顶窗口，建议使用无边框模式。"
+        )
+        floating_hint.setObjectName("helper")
+        floating_hint.setWordWrap(True)
+        floating_layout.addWidget(floating_hint)
+        layout.addWidget(floating_card)
         layout.addWidget(self._build_hardware_card())
 
         update_card = Card()
@@ -1626,6 +1876,44 @@ class MainWindow(QMainWindow):
         self._sync_target_mode_controls()
         self._save_profile()
 
+    def _floating_status_toggled(self, checked: bool) -> None:
+        self.engine.update_config(floating_status_enabled=checked)
+        self._sync_floating_status_controls()
+        self._sync_floating_status_visibility()
+
+    def _floating_opacity_changed(self, value: int) -> None:
+        self.engine.update_config(floating_status_opacity=value)
+        self._sync_floating_status_controls()
+
+    def _sync_floating_status_controls(self) -> None:
+        enabled = self.floating_status_check.isChecked()
+        opacity = self.floating_opacity_slider.value()
+        self.floating_opacity_panel.setEnabled(enabled)
+        self.floating_opacity_value.setText(f"{opacity}%")
+        self.floating_status_bar.set_background_opacity(opacity)
+
+    def _sync_floating_calibration_state(self) -> None:
+        config = self.engine.config()
+        calibrated = (
+            config.target_button_offset is not None
+            if config.capture_mode == "window"
+            else config.button_center is not None
+        )
+        self.floating_status_bar.set_calibrated(calibrated)
+
+    def _sync_floating_status_visibility(self) -> None:
+        self._sync_floating_calibration_state()
+        config = self.engine.config()
+        should_show = (
+            config.floating_status_enabled
+            and config.capture_mode == "window"
+            and self.isMinimized()
+        )
+        if should_show:
+            self.floating_status_bar.show_at_default_position()
+        else:
+            self.floating_status_bar.hide()
+
     def _load_config(self, config: AppConfig) -> None:
         controls = [
             self.monitor_combo,
@@ -1660,6 +1948,8 @@ class MainWindow(QMainWindow):
             self.recovery_forward_taps_spin,
             self.recovery_w_only_count_spin,
             self.recovery_w_only_hold_spin,
+            self.floating_status_check,
+            self.floating_opacity_slider,
             self.github_auto_check,
         ]
         blockers = [QSignalBlocker(control) for control in controls]
@@ -1707,6 +1997,8 @@ class MainWindow(QMainWindow):
         self.recovery_w_only_hold_spin.setValue(
             config.recovery_w_only_hold_seconds
         )
+        self.floating_status_check.setChecked(config.floating_status_enabled)
+        self.floating_opacity_slider.setValue(config.floating_status_opacity)
         self.github_auto_check.setChecked(config.github_auto_check)
         del blockers
         self._sync_target_mode_controls()
@@ -1715,6 +2007,8 @@ class MainWindow(QMainWindow):
         self._sync_recovery_mode_controls()
         self._sync_recognition_backend_controls()
         self._refresh_threshold_display(config.fish_red_pixel_threshold)
+        self._sync_floating_status_controls()
+        self._sync_floating_status_visibility()
     def _connect_controls(self) -> None:
         self.monitor_combo.currentIndexChanged.connect(self._save_profile)
         self.mode_combo.currentIndexChanged.connect(self._save_profile)
@@ -1803,6 +2097,12 @@ class MainWindow(QMainWindow):
         )
         self.restore_button.clicked.connect(self._restore_recommended_settings)
 
+        self.floating_status_check.toggled.connect(
+            self._floating_status_toggled
+        )
+        self.floating_opacity_slider.valueChanged.connect(
+            self._floating_opacity_changed
+        )
         self.check_update_button.clicked.connect(lambda: self._check_for_updates(manual=True))
         self.github_auto_check.toggled.connect(
             lambda checked: self.engine.update_config(github_auto_check=checked)
@@ -1903,6 +2203,7 @@ class MainWindow(QMainWindow):
         self._sync_target_mode_controls()
         self._sync_auto_roi_controls()
         self._refresh_calibration_summary()
+        self._sync_floating_status_visibility()
     def _calibrate(self) -> None:
         self.calibration_summary.setText("校准待命：将鼠标停在钓鱼按钮正中心后按 F7，当前位置会立即记录，鼠标不会移动。")
         self._append_log("校准说明已显示：请把鼠标停在钓鱼按钮中心后按 F7；不要点击助手窗口来记录坐标。", EventKind.INFO)
@@ -2112,11 +2413,13 @@ class MainWindow(QMainWindow):
     def _apply_theme(self, theme: str) -> None:
         is_day = theme == "day"
         self.setStyleSheet(DAY_STYLE if is_day else NIGHT_STYLE)
+        self.floating_status_bar.set_theme(theme)
         self.theme_button.setText("☾ 夜间模式" if is_day else "☀ 日间模式")
         self.theme_button.setToolTip("切换至夜间模式" if is_day else "切换至日间模式")
 
     def _refresh_calibration_summary(self) -> None:
         config = self.engine.config()
+        self._sync_floating_calibration_state()
         if config.capture_mode == "window":
             if config.target_button_offset is None:
                 self.calibration_summary.setText("后台模式尚未校准。选择洛奇 M 窗口后，将鼠标放在按钮中心并校准。")
@@ -2262,6 +2565,7 @@ class MainWindow(QMainWindow):
         self.runtime_state_chip.setText(f"状态 · {text}")
         self.runtime_state_chip.style().unpolish(self.runtime_state_chip)
         self.runtime_state_chip.style().polish(self.runtime_state_chip)
+        self.floating_status_bar.set_runtime(text, state)
 
     def _set_status(self, state: str, text: str) -> None:
         self.status_chip.setProperty("state", state)
@@ -2299,6 +2603,15 @@ class MainWindow(QMainWindow):
     def _mode_name(value: str) -> str:
         return {"borderless": "无边框全屏", "fullscreen": "独占全屏", "windowed": "窗口模式"}.get(value, value)
 
+    def changeEvent(self, event: QEvent) -> None:  # noqa: N802
+        super().changeEvent(event)
+        if (
+            event.type() == QEvent.Type.WindowStateChange
+            and hasattr(self, "floating_status_bar")
+        ):
+            self._sync_floating_status_visibility()
+
     def closeEvent(self, event: object) -> None:  # type: ignore[override]
+        self.floating_status_bar.close()
         self.engine.close()
         event.accept()  # type: ignore[union-attr]

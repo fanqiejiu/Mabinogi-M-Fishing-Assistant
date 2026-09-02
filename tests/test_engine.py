@@ -53,7 +53,7 @@ class FishingEngineTests(unittest.TestCase):
             with patch("fishing_assistant.config.CONFIG_PATH", config_path):
                 config = load_config()
 
-        self.assertEqual(config.schema_version, 18)
+        self.assertEqual(config.schema_version, 20)
         self.assertEqual(config.recognition_backend, "ok")
         self.assertEqual(config.runtime_error_retry_count, 5)
         self.assertTrue(config.auto_scale_roi)
@@ -67,6 +67,8 @@ class FishingEngineTests(unittest.TestCase):
         self.assertEqual(config.recovery_movement_mode, "ws")
         self.assertEqual(config.recovery_w_only_count, 1)
         self.assertEqual(config.recovery_w_only_hold_seconds, 0.5)
+        self.assertTrue(config.floating_status_enabled)
+        self.assertEqual(config.floating_status_opacity, 92)
 
     def test_integer_fixed_delay_migrates_to_float(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -83,7 +85,7 @@ class FishingEngineTests(unittest.TestCase):
             with patch("fishing_assistant.config.CONFIG_PATH", config_path):
                 config = load_config()
 
-        self.assertEqual(config.schema_version, 18)
+        self.assertEqual(config.schema_version, 20)
         self.assertEqual(config.fallback_collect_delay_seconds, 5.0)
         self.assertIsInstance(config.fallback_collect_delay_seconds, float)
         self.assertEqual(config.fixed_delay_latest_collect_seconds, 10.5)

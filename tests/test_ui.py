@@ -9,9 +9,11 @@ from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QDialog, QLabel, QTextBrowser
 
 from fishing_assistant.ui import (
+    FloatingStatusBar,
     MainWindow,
     ScrollSafeComboBox,
     ScrollSafeDoubleSpinBox,
@@ -20,6 +22,7 @@ from fishing_assistant.ui import (
     UpdateAvailableDialog,
     WOnlyModeWarningDialog,
 )
+from fishing_assistant.config import AppConfig
 from fishing_assistant.updates import UpdateResult
 
 
@@ -48,6 +51,121 @@ class UiRegressionTests(unittest.TestCase):
             event = _IgnoredWheelEvent()
             control.wheelEvent(event)  # type: ignore[arg-type]
             self.assertTrue(event.ignored, type(control).__name__)
+
+    def test_floating_status_bar_is_compact_topmost_and_updates(self) -> None:
+        bar = FloatingStatusBar()
+        try:
+            self.assertLessEqual(bar.width(), 360)
+            self.assertLessEqual(bar.height(), 90)
+            self.assertTrue(
+                bar.windowFlags() & Qt.WindowType.WindowStaysOnTopHint
+            )
+            self.assertTrue(
+                bar.windowFlags() & Qt.WindowType.WindowDoesNotAcceptFocus
+            )
+            bar.set_calibrated(True)
+            bar.set_runtime("等待上钩", "running")
+            bar.set_background_opacity(63)
+            self.assertEqual(bar.calibration_label.text(), "校准 · 已完成")
+            self.assertEqual(bar.runtime_label.text(), "运行 · 等待上钩")
+            self.assertEqual(bar.runtime_label.property("state"), "running")
+            self.assertEqual(bar.background_opacity(), 63)
+            bar.show()
+            self.app.processEvents()
+            background = bar.grab().toImage().pixelColor(bar.width() // 2, 5)
+            self.assertGreaterEqual(background.alpha(), 150)
+            self.assertLessEqual(background.alpha(), 170)
+        finally:
+            bar.close()
+
+    def test_floating_status_only_shows_for_minimized_background_mode(self) -> None:
+        config = SimpleNamespace(
+            floating_status_enabled=True,
+            capture_mode="window",
+        )
+        owner = SimpleNamespace(
+            engine=MagicMock(),
+            floating_status_bar=MagicMock(),
+            isMinimized=MagicMock(return_value=True),
+            _sync_floating_calibration_state=MagicMock(),
+        )
+        owner.engine.config.return_value = config
+
+        MainWindow._sync_floating_status_visibility(owner)  # type: ignore[arg-type]
+
+        owner.floating_status_bar.show_at_default_position.assert_called_once()
+        owner.floating_status_bar.hide.assert_not_called()
+
+        config.capture_mode = "screen"
+        MainWindow._sync_floating_status_visibility(owner)  # type: ignore[arg-type]
+        owner.floating_status_bar.hide.assert_called_once()
+
+    def test_floating_status_setting_is_saved_immediately(self) -> None:
+        owner = SimpleNamespace(
+            engine=MagicMock(),
+            _sync_floating_status_controls=MagicMock(),
+            _sync_floating_status_visibility=MagicMock(),
+        )
+
+        MainWindow._floating_status_toggled(owner, False)  # type: ignore[arg-type]
+
+        owner.engine.update_config.assert_called_once_with(
+            floating_status_enabled=False
+        )
+        owner._sync_floating_status_controls.assert_called_once_with()
+        owner._sync_floating_status_visibility.assert_called_once_with()
+
+    def test_floating_background_opacity_is_saved_and_previewed(self) -> None:
+        owner = SimpleNamespace(
+            engine=MagicMock(),
+            _sync_floating_status_controls=MagicMock(),
+        )
+
+        MainWindow._floating_opacity_changed(owner, 68)  # type: ignore[arg-type]
+
+        owner.engine.update_config.assert_called_once_with(
+            floating_status_opacity=68
+        )
+        owner._sync_floating_status_controls.assert_called_once_with()
+
+    def test_minimizing_background_main_window_shows_floating_status(self) -> None:
+        state = {
+            "config": AppConfig(
+                capture_mode="window",
+                target_button_offset=(1600, 860),
+                floating_status_enabled=True,
+            )
+        }
+        engine = MagicMock()
+        engine.config.side_effect = lambda: state["config"].copy()
+
+        def update_config(**changes: object) -> AppConfig:
+            state["config"] = state["config"].copy(**changes)
+            return state["config"].copy()
+
+        engine.update_config.side_effect = update_config
+        engine.is_monitoring.return_value = False
+        with patch(
+            "fishing_assistant.ui.window_target.list_target_windows",
+            return_value=[],
+        ):
+            window = MainWindow(engine)
+        try:
+            window.show()
+            self.app.processEvents()
+            window.showMinimized()
+            self.app.processEvents()
+            self.assertTrue(window.floating_status_bar.isVisible())
+            self.assertEqual(
+                window.floating_status_bar.calibration_label.text(),
+                "校准 · 已完成",
+            )
+            window.showNormal()
+            self.app.processEvents()
+            self.assertFalse(window.floating_status_bar.isVisible())
+        finally:
+            window.close()
+            self.app.processEvents()
 
     def test_update_dialog_is_compact_and_shows_version(self) -> None:
         result = UpdateResult(
