@@ -389,10 +389,40 @@ class UiRegressionTests(unittest.TestCase):
         try:
             self.assertTrue(dialog.isModal())
             self.assertFalse(dialog.confirm_button.isEnabled())
+            labels = "\n".join(
+                label.text() for label in dialog.findChildren(QLabel)
+            )
+            self.assertIn("不需要启用正式自动清理", labels)
+            self.assertIn("不会修改正式功能开关", labels)
             dialog.acknowledge_check.setChecked(True)
             self.assertTrue(dialog.confirm_button.isEnabled())
         finally:
             dialog.close()
+
+    def test_debug_cleanup_is_available_while_feature_toggle_is_off(self) -> None:
+        owner = SimpleNamespace(
+            engine=MagicMock(),
+            test_inventory_cleanup_button=MagicMock(),
+            inventory_cleanup_test_status=MagicMock(),
+        )
+        owner.engine.config.return_value = SimpleNamespace(
+            capture_mode="screen",
+            button_center=(1700, 900),
+            target_button_offset=None,
+            inventory_auto_cleanup_enabled=False,
+        )
+        owner.engine.is_monitoring.return_value = False
+
+        MainWindow._sync_inventory_cleanup_debug_controls(  # type: ignore[arg-type]
+            owner
+        )
+
+        owner.test_inventory_cleanup_button.setEnabled.assert_called_once_with(
+            True
+        )
+        status = owner.inventory_cleanup_test_status.setText.call_args.args[0]
+        self.assertIn("无需开启正式自动清理", status)
+        self.assertIn("不会修改正式功能开关", status)
 
     def test_debug_section_contains_inventory_cleanup_as_child_option(self) -> None:
         owner = SimpleNamespace(_card_heading=MainWindow._card_heading)
@@ -460,9 +490,6 @@ class UiRegressionTests(unittest.TestCase):
             engine=MagicMock(),
             inventory_cleanup_test_status=MagicMock(),
             _sync_inventory_cleanup_debug_controls=MagicMock(),
-        )
-        owner.engine.config.return_value = SimpleNamespace(
-            inventory_auto_cleanup_enabled=True
         )
         owner.engine.is_monitoring.return_value = False
         owner.engine.request_inventory_cleanup_test.return_value = True

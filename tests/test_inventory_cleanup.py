@@ -231,20 +231,20 @@ class InventoryCleanupFlowTests(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertIn("没有继续执行后续整理点击", errors[0].message)
 
-    def test_debug_request_requires_enabled_feature_and_calibration(self) -> None:
+    def test_debug_request_only_requires_calibration_not_feature_toggle(self) -> None:
         self.engine._enabled.clear()  # type: ignore[attr-defined]
         self.engine._config = AppConfig()  # type: ignore[attr-defined]
         self.assertFalse(self.engine.request_inventory_cleanup_test())
 
         self.engine._config = AppConfig(  # type: ignore[attr-defined]
-            inventory_auto_cleanup_enabled=True,
+            capture_mode="screen",
         )
         self.assertFalse(self.engine.request_inventory_cleanup_test())
 
         self.engine._config = AppConfig(  # type: ignore[attr-defined]
             capture_mode="screen",
             button_center=(1700, 900),
-            inventory_auto_cleanup_enabled=True,
+            inventory_auto_cleanup_enabled=False,
         )
         self.assertTrue(self.engine.request_inventory_cleanup_test())
         self.assertTrue(self.engine.is_monitoring())

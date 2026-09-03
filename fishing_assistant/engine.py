@@ -406,14 +406,8 @@ class FishingEngine:
         return self._enabled.is_set()
 
     def request_inventory_cleanup_test(self) -> bool:
-        """让监测线程执行一次真实整理测试，完成后保持暂停。"""
+        """独立执行一次真实整理测试；不依赖正式自动清理开关。"""
         config = self.config()
-        if not config.inventory_auto_cleanup_enabled:
-            self._emit(
-                EventKind.WARNING,
-                "请先在“背包清理（实验性）”中启用功能，再进行调试测试。",
-            )
-            return False
         if self._enabled.is_set():
             self._emit(
                 EventKind.WARNING,
@@ -445,7 +439,7 @@ class FishingEngine:
         self._enabled.set()
         self._emit(
             EventKind.STATE,
-            "自动清理背包调试：已排队，正在准备真实整理测试。",
+            "背包清理调试：已独立排队，不会开启正式自动清理功能；正在准备真实整理测试。",
             monitoring=True,
         )
         return True

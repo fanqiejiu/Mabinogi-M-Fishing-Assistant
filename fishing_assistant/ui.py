@@ -519,6 +519,7 @@ class InventoryCleanupTestDialog(QDialog):
         layout.addWidget(title)
 
         message = QLabel(
+            "此调试不需要启用正式自动清理，也不会修改正式功能开关。"
             "点击继续后会立刻打开游戏背包并真实执行整理，物品可能被永久分解或出售。"
             "请先暂停普通监测，并让游戏停留在可正常打开背包的画面。"
         )
@@ -1919,7 +1920,7 @@ class MainWindow(QMainWindow):
         option_title.setObjectName("debugOptionTitle")
         test_layout.addWidget(option_title)
         option_hint = QLabel(
-            "从当前游戏画面真实执行一次完整清理，完成后保持监测暂停。"
+            "无需打开正式功能开关，可从当前游戏画面独立执行一次完整清理；完成后保持监测暂停。"
         )
         option_hint.setObjectName("helper")
         option_hint.setWordWrap(True)
@@ -1937,7 +1938,7 @@ class MainWindow(QMainWindow):
         self.test_inventory_cleanup_button.setObjectName("dangerButton")
         test_layout.addWidget(self.test_inventory_cleanup_button)
         self.inventory_cleanup_test_status = QLabel(
-            "请先启用“背包清理（实验性）”并完成 F7 校准。"
+            "无需启用“背包清理（实验性）”；完成 F7 校准后即可单独测试。"
         )
         self.inventory_cleanup_test_status.setObjectName("helper")
         self.inventory_cleanup_test_status.setWordWrap(True)
@@ -2544,27 +2545,21 @@ class MainWindow(QMainWindow):
             else config.button_center is not None
         )
         monitoring = self.engine.is_monitoring()
-        enabled = config.inventory_auto_cleanup_enabled
         self.test_inventory_cleanup_button.setEnabled(
-            enabled and calibrated and not monitoring
+            calibrated and not monitoring
         )
-        if not enabled:
-            message = "请先在“钓鱼设置 → 背包清理（实验性）”中启用功能。"
-        elif not calibrated:
+        if not calibrated:
             message = "请先回到控制台完成 F7 校准。"
         elif monitoring:
             message = "当前监测或测试正在运行；暂停后才能开始新的清理测试。"
         else:
-            message = "已就绪。点击后仍需再次确认，测试会真实整理物品。"
+            message = (
+                "已就绪。无需开启正式自动清理；点击后仍需确认风险，"
+                "测试会真实整理物品，但不会修改正式功能开关。"
+            )
         self.inventory_cleanup_test_status.setText(message)
 
     def _test_inventory_cleanup(self) -> None:
-        config = self.engine.config()
-        if not config.inventory_auto_cleanup_enabled:
-            self.inventory_cleanup_test_status.setText(
-                "功能尚未启用，未开始测试。"
-            )
-            return
         if self.engine.is_monitoring():
             self.inventory_cleanup_test_status.setText(
                 "请先暂停普通监测，再开始测试。"
