@@ -25,6 +25,9 @@ WM_KEYDOWN = 0x0100
 WM_KEYUP = 0x0101
 WM_ACTIVATE = 0x0006
 WM_MOUSEMOVE = 0x0200
+WM_LBUTTONDOWN = 0x0201
+WM_LBUTTONUP = 0x0202
+MK_LBUTTON = 0x0001
 WA_ACTIVE = 1
 SW_RESTORE = 9
 PW_RENDERFULLCONTENT = 0x00000002
@@ -158,7 +161,7 @@ class _OkWindowAdapter:
 
 
 class OkWindowBackend:
-    """用 ok-script 的 WGC 与 PostMessage 组件提供指定窗口的实验性后台后端。"""
+    """用 ok-script 的 WGC 与 PostMessage 组件提供指定窗口后台后端。"""
 
     def __init__(self, info: WindowInfo) -> None:
         self._exit_event = threading.Event()
@@ -244,6 +247,15 @@ class OkWindowBackend:
         with self._lock:
             self._ensure_started()
             self._interaction.move(*center_offset)  # type: ignore[union-attr]
+
+    def click(self, info: WindowInfo, point: tuple[int, int]) -> None:
+        """通过 OK PostMessage 点击窗口内坐标，不移动系统真实光标。"""
+        self.update(info)
+        x = min(max(0, int(point[0])), max(0, info.width - 1))
+        y = min(max(0, int(point[1])), max(0, info.height - 1))
+        with self._lock:
+            self._ensure_started()
+            self._interaction.click(x, y)  # type: ignore[union-attr]
 
     def close(self) -> None:
         self._exit_event.set()
@@ -450,12 +462,39 @@ def post_mouse_move(handle: int, center_offset: tuple[int, int]) -> None:
         raise ctypes.WinError(ctypes.get_last_error())
 
 
+def post_mouse_click(handle: int, point: tuple[int, int]) -> None:
+    """向指定窗口投递一次左键点击，不移动系统真实光标。"""
+    _require_windows()
+    info = get_window_info(handle)
+    if info is None:
+        raise RuntimeError("目标窗口已关闭或不可见，无法后台点击。")
+    x = min(max(0, int(point[0])), max(0, info.width - 1))
+    y = min(max(0, int(point[1])), max(0, info.height - 1))
+    lparam = ((y & 0xFFFF) << 16) | (x & 0xFFFF)
+    hwnd = wintypes.HWND(info.handle)
+    if not _user32.PostMessageW(hwnd, WM_ACTIVATE, WA_ACTIVE, 0):
+        raise ctypes.WinError(ctypes.get_last_error())
+    if not _user32.PostMessageW(hwnd, WM_MOUSEMOVE, 0, lparam):
+        raise ctypes.WinError(ctypes.get_last_error())
+    if not _user32.PostMessageW(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, lparam):
+        raise ctypes.WinError(ctypes.get_last_error())
+    time.sleep(0.02)
+    if not _user32.PostMessageW(hwnd, WM_LBUTTONUP, 0, lparam):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
 def post_key_tap(
     handle: int, key: str, hold_ms: int = 0, *, activate_message: bool = False
 ) -> None:
     """仅向目标窗口投递键盘消息，不影响当前前台应用。"""
     _require_windows()
-    virtual_key = {"space": 0x20, "w": 0x57, "s": 0x53}.get(key.lower())
+    virtual_key = {
+        "space": 0x20,
+        "w": 0x57,
+        "s": 0x53,
+        "i": 0x49,
+        "esc": 0x1B,
+    }.get(key.lower())
     if virtual_key is None:
         raise ValueError(f"不支持的定向按键：{key}")
     if get_window_info(handle) is None:

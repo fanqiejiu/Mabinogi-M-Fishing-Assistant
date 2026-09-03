@@ -73,7 +73,7 @@ def scaled_roi_size(width: int, height: int) -> tuple[int, int]:
 class AppConfig:
     """以后新增选项时，在此处加入字段即可自动兼容旧配置文件。"""
 
-    schema_version: int = 20
+    schema_version: int = 22
     button_center: tuple[int, int] | None = None
     monitor_index: int = 1
     display_mode: str = "borderless"
@@ -121,8 +121,8 @@ class AppConfig:
     stamina_zoom_in_steps: int = 5
     # 模式一检测到跑鱼提示后记录本次上钩持续时间，供下一次计时兜底。
     learned_escape_seconds: float = 0.0
-    # screen：当前稳定模式；window：指定窗口后台模式（实验性）。
-    capture_mode: str = "screen"
+    # window：推荐的指定窗口后台模式；screen：需要游戏保持前台的屏幕坐标模式。
+    capture_mode: str = "window"
     # ok：OK 框架的 WGC 截图 + PostMessage；printwindow：旧版兼容实现。
     window_backend: str = "ok"
     target_window_handle: int = 0
@@ -132,6 +132,11 @@ class AppConfig:
     floating_status_enabled: bool = True
     # 仅调整悬浮栏底色；文字始终保持完全不透明。
     floating_status_opacity: int = 92
+    # 背包满时自动进入整理流程；默认关闭，只使用关闭“大胆整理”后的四类简单整理。
+    inventory_auto_cleanup_enabled: bool = False
+    # 语音目录按 voice/人物名/事件名N.wav 组织；编号文件为同事件随机音色。
+    voice_alerts_enabled: bool = True
+    voice_character: str = "新海天"
     # 更新源固定为项目仓库；是否在启动时自动检查由用户设置决定。
     github_repository: str = GITHUB_REPOSITORY
     github_auto_check: bool = True
@@ -251,6 +256,13 @@ def _config_from_raw(raw: dict) -> AppConfig:
     if int(raw.get("schema_version", 0)) < 20:
         raw["floating_status_opacity"] = 92
         raw["schema_version"] = 20
+    if int(raw.get("schema_version", 0)) < 21:
+        raw["inventory_auto_cleanup_enabled"] = False
+        raw["schema_version"] = 21
+    if int(raw.get("schema_version", 0)) < 22:
+        raw["voice_alerts_enabled"] = True
+        raw["voice_character"] = "新海天"
+        raw["schema_version"] = 22
     try:
         raw["fallback_collect_delay_seconds"] = float(
             raw.get("fallback_collect_delay_seconds", 5.3)
@@ -313,6 +325,18 @@ def _config_from_raw(raw: dict) -> AppConfig:
         raw["recognition_backend"] = "ok"
     raw["floating_status_enabled"] = bool(
         raw.get("floating_status_enabled", True)
+    )
+    raw["inventory_auto_cleanup_enabled"] = bool(
+        raw.get("inventory_auto_cleanup_enabled", False)
+    )
+    raw["voice_alerts_enabled"] = bool(
+        raw.get("voice_alerts_enabled", True)
+    )
+    voice_character = raw.get("voice_character", "新海天")
+    raw["voice_character"] = (
+        voice_character.strip()
+        if isinstance(voice_character, str) and voice_character.strip()
+        else "新海天"
     )
     try:
         raw["floating_status_opacity"] = max(

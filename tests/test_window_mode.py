@@ -211,6 +211,16 @@ class WindowModeTests(unittest.TestCase):
         backend.keep_hover(self.target, (1600, 860))
 
         backend._interaction.move.assert_called_once_with(1600, 860)  # type: ignore[attr-defined]
+
+    def test_ok_window_backend_click_uses_message_only_and_clamps(self) -> None:
+        backend = window_target.OkWindowBackend(self.target)
+        backend._capture = object()  # type: ignore[attr-defined]
+        backend._interaction = MagicMock()  # type: ignore[attr-defined]
+
+        backend.click(self.target, (2500, -10))
+
+        backend._interaction.click.assert_called_once_with(1919, 0)  # type: ignore[attr-defined]
+
     @patch("fishing_assistant.engine.window_target.OkWindowBackend")
     @patch("fishing_assistant.engine.window_target.resolve_window")
     def test_ok_window_backend_handles_capture_and_key(

@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 APP_NAME = "洛奇 M 钓鱼助手"
-APP_VERSION = "0.6.2.6"
+APP_VERSION = "0.6.3"
 APP_AUTHOR = "番茄啾"
 APP_DISPLAY_VERSION = APP_VERSION
 GITHUB_REPOSITORY = "fanqiejiu/Mabinogi-M-Fishing-Assistant"
@@ -23,6 +23,7 @@ def resource_path(*parts: str) -> Path:
 
 
 APP_ICON_PATH = resource_path("fishing_assistant", "assets", "tomato_fish_icon.png")
+VOICE_DIR = resource_path("voice")
 OK_IDLE_MOTION_TEMPLATE_PATH = resource_path(
     "fishing_assistant", "assets", "ok_icon_idle_recovery_motion.gif"
 )
@@ -62,6 +63,21 @@ INVENTORY_FULL_TEMPLATE_PATH = resource_path(
 )
 INVENTORY_FULL_ICON_TEMPLATE_PATH = resource_path(
     "fishing_assistant", "assets", "inventory_full_icon.png"
+)
+INVENTORY_TIDY_ANCHOR_PATH = resource_path(
+    "fishing_assistant", "assets", "inventory_tidy_anchor.png"
+)
+CLEANUP_SIMPLE_HEADER_PATH = resource_path(
+    "fishing_assistant", "assets", "cleanup_simple_header.png"
+)
+CLEANUP_DETAIL_HEADER_PATH = resource_path(
+    "fishing_assistant", "assets", "cleanup_detail_header.png"
+)
+CLEANUP_RESULT_HEADER_PATH = resource_path(
+    "fishing_assistant", "assets", "cleanup_result_header.png"
+)
+CLEANUP_DONE_TOAST_PATH = resource_path(
+    "fishing_assistant", "assets", "cleanup_done_toast.png"
 )
 ROD_REQUIRED_TEMPLATE_PATH = resource_path(
     "fishing_assistant", "assets", "rod_required_text.png"

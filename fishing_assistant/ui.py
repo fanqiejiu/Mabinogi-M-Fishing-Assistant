@@ -70,6 +70,13 @@ from .diagnostics import (
 from .engine import EngineEvent, EventKind, FishingEngine, IconState
 from .system_profile import SystemProfile, collect_system_profile
 from .updates import UpdateResult, check_github_release
+from .voice_alerts import (
+    F7_CALIBRATION_CUE,
+    WINDOW_MINIMIZED_CUE,
+    WINDOW_RESTORED_CUE,
+    VoiceAlertPlayer,
+    cue_for_engine_event,
+)
 
 
 NIGHT_STYLE = """
@@ -87,6 +94,10 @@ QFrame#metricCard { border-radius: 12px; background: #0D192A; }
 QFrame#backendOptions, QFrame#strategyOption {
     background: #0D192A; border: 1px solid #263A54; border-radius: 10px;
 }
+QFrame#debugOption {
+    background: #0D192A; border: 1px solid #263A54; border-radius: 12px;
+}
+QLabel#debugOptionTitle { color: #EAF3FD; font-size: 14px; font-weight: 700; }
 QFrame#backendOptions[modeActive="true"] { background: #102A31; border-color: #2DB88B; }
 QFrame#backendOptions[modeActive="true"] QLabel#formLabel { color: #E8FFF7; }
 QFrame#backendOptions[modeActive="true"] QLabel#helper { color: #94C9B8; }
@@ -180,7 +191,7 @@ QWidget { color: #1B2A40; }
 QFrame#sidebar { background: #FFFFFF; border-right-color: #D9E3EF; }
 QFrame#card, QFrame#metricCard { background: #FFFFFF; border-color: #D7E2EE; }
 QFrame#metricCard { background: #F8FBFE; }
-QFrame#backendOptions, QFrame#strategyOption { background: #F8FBFE; border-color: #D4E0EC; }
+QFrame#backendOptions, QFrame#strategyOption, QFrame#debugOption { background: #F8FBFE; border-color: #D4E0EC; }
 QFrame#backendOptions[modeActive="true"] { background: #ECFAF5; border-color: #70CBAE; }
 QFrame#backendOptions[modeActive="true"] QLabel#formLabel { color: #163F34; }
 QFrame#backendOptions[modeActive="true"] QLabel#helper { color: #47776A; }
@@ -397,7 +408,8 @@ class WOnlyModeWarningDialog(QDialog):
         layout.addWidget(title)
 
         message = QLabel(
-            "请先把镜头视角调整为朝向河岸，并确认当前为角色背部视角。"
+            "请先在游戏设置中将镜头模式改为“手动镜头”，再把镜头视角调整为朝向河岸，"
+            "并确认当前为角色背部视角。"
             "方向不正确时，持续按 W 可能让角色远离钓鱼区域。"
         )
         message.setObjectName("cardHint")
@@ -410,7 +422,7 @@ class WOnlyModeWarningDialog(QDialog):
         layout.addWidget(recommendation)
 
         self.acknowledge_check = QCheckBox(
-            "我已知晓，并确认镜头与角色朝向正确"
+            "我已改为手动镜头，并确认镜头与角色朝向正确"
         )
         layout.addWidget(self.acknowledge_check)
 
@@ -421,6 +433,118 @@ class WOnlyModeWarningDialog(QDialog):
         actions.addWidget(cancel_button)
         self.confirm_button = QPushButton("继续使用仅 W")
         self.confirm_button.setObjectName("primaryButton")
+        self.confirm_button.setEnabled(False)
+        self.confirm_button.clicked.connect(self.accept)
+        actions.addWidget(self.confirm_button)
+        layout.addLayout(actions)
+
+        self.acknowledge_check.toggled.connect(self.confirm_button.setEnabled)
+
+
+class InventoryCleanupWarningDialog(QDialog):
+    """启用自动整理前，明确提示装备会被永久分解。"""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("updateDialog")
+        self.setWindowTitle("自动清理背包提醒")
+        self.setModal(True)
+        self.setMinimumWidth(420)
+        self.setMaximumWidth(480)
+        self.setSizeGripEnabled(False)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 20, 22, 18)
+        layout.setSpacing(11)
+
+        title = QLabel("启用前请确认")
+        title.setObjectName("updateDialogTitle")
+        layout.addWidget(title)
+
+        message = QLabel(
+            "背包满时，助手会进入简单整理，并尝试选择装备、材料、黄金及杂物、"
+            "恢复道具四类；整理结果无法由助手撤销。"
+        )
+        message.setObjectName("cardHint")
+        message.setWordWrap(True)
+        layout.addWidget(message)
+
+        safety = QLabel(
+            "流程会尝试关闭“大胆整理”，并在点击整理前分两轮、每轮连续 3 帧核验。"
+            "但这是实验性功能：游戏界面变化或识别误判仍可能导致误操作，"
+            "包括意外保留或误用“大胆整理”。"
+        )
+        safety.setObjectName("helper")
+        safety.setWordWrap(True)
+        layout.addWidget(safety)
+
+        self.acknowledge_check = QCheckBox(
+            "我已知晓上述风险，包括可能误用“大胆整理”"
+        )
+        layout.addWidget(self.acknowledge_check)
+
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        cancel_button = QPushButton("保持关闭")
+        cancel_button.clicked.connect(self.reject)
+        actions.addWidget(cancel_button)
+        self.confirm_button = QPushButton("确认启用")
+        self.confirm_button.setObjectName("dangerButton")
+        self.confirm_button.setEnabled(False)
+        self.confirm_button.clicked.connect(self.accept)
+        actions.addWidget(self.confirm_button)
+        layout.addLayout(actions)
+
+        self.acknowledge_check.toggled.connect(self.confirm_button.setEnabled)
+
+
+class InventoryCleanupTestDialog(QDialog):
+    """调试页执行真实清理前的二次确认。"""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("updateDialog")
+        self.setWindowTitle("测试背包清理流程")
+        self.setModal(True)
+        self.setMinimumWidth(420)
+        self.setMaximumWidth(480)
+        self.setSizeGripEnabled(False)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 20, 22, 18)
+        layout.setSpacing(11)
+
+        title = QLabel("这不是模拟测试")
+        title.setObjectName("updateDialogTitle")
+        layout.addWidget(title)
+
+        message = QLabel(
+            "点击继续后会立刻打开游戏背包并真实执行整理，物品可能被永久分解或出售。"
+            "请先暂停普通监测，并让游戏停留在可正常打开背包的画面。"
+        )
+        message.setObjectName("cardHint")
+        message.setWordWrap(True)
+        layout.addWidget(message)
+
+        risk = QLabel(
+            "即使有多帧核验，仍存在识别误判并误用“大胆整理”的风险。"
+        )
+        risk.setObjectName("helper")
+        risk.setWordWrap(True)
+        layout.addWidget(risk)
+
+        self.acknowledge_check = QCheckBox(
+            "我确认现在执行真实清理，并承担不可逆风险"
+        )
+        layout.addWidget(self.acknowledge_check)
+
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        cancel_button = QPushButton("取消")
+        cancel_button.clicked.connect(self.reject)
+        actions.addWidget(cancel_button)
+        self.confirm_button = QPushButton("开始真实测试")
+        self.confirm_button.setObjectName("dangerButton")
         self.confirm_button.setEnabled(False)
         self.confirm_button.clicked.connect(self.accept)
         actions.addWidget(self.confirm_button)
@@ -597,6 +721,7 @@ class MainWindow(QMainWindow):
     def __init__(self, engine: FishingEngine) -> None:
         super().__init__()
         self.engine = engine
+        self.voice_player = VoiceAlertPlayer()
         self.engine.set_event_callback(self.engine_event.emit)
         self.engine_event.connect(self._consume_engine_event)
         self.profile_ready.connect(self._show_system_profile)
@@ -802,7 +927,7 @@ class MainWindow(QMainWindow):
             0,
         )
         form.addWidget(self.resolution_combo, 3, 0)
-        form.addWidget(self._form_label("操作按键", "上钩时发送至前台游戏"), 2, 1)
+        form.addWidget(self._form_label("操作按键", "上钩时向所选目标发送"), 2, 1)
         key_value = QLabel("Space")
         key_value.setObjectName("metricValue")
         key_value.setStyleSheet("font-size: 20px; padding: 8px 0;")
@@ -813,8 +938,8 @@ class MainWindow(QMainWindow):
         target.setHorizontalSpacing(18)
         target.setVerticalSpacing(10)
         self.target_mode_combo = ScrollSafeComboBox()
-        self.target_mode_combo.addItem("屏幕坐标模式（稳定）", "screen")
-        self.target_mode_combo.addItem("指定窗口后台模式（实验性）", "window")
+        self.target_mode_combo.addItem("指定窗口后台模式（推荐）", "window")
+        self.target_mode_combo.addItem("屏幕坐标模式（前台）", "screen")
         self.window_backend_combo = ScrollSafeComboBox()
         self.window_backend_combo.addItem("OK 后台引擎（WGC + PostMessage）", "ok")
         self.window_backend_combo.addItem("兼容引擎（PrintWindow）", "printwindow")
@@ -847,7 +972,7 @@ class MainWindow(QMainWindow):
         target.addWidget(
             self._form_label(
                 "捕捉与按键模式",
-                "屏幕模式要求游戏在前台；后台模式只向指定窗口投递按键",
+                "推荐后台模式；前台模式依赖当前屏幕画面和真实鼠标",
             ),
             0,
             0,
@@ -1065,6 +1190,13 @@ class MainWindow(QMainWindow):
         timing_title.setObjectName("timingTitle")
         timing_layout.addWidget(timing_title)
         timing_layout.addWidget(self.learned_escape_label)
+        timing_formula = QLabel(
+            "兜底计算：记录跑鱼总时长 T，提前量取 T × 10%（限制为 1.0–2.0 秒），"
+            "下一轮在 max(1.0 秒, T − 提前量) 时收杆。正常识别到反弹时仍立即收杆。"
+        )
+        timing_formula.setObjectName("helper")
+        timing_formula.setWordWrap(True)
+        timing_layout.addWidget(timing_formula)
         mode_one_panel.layout().addWidget(timing_panel)
 
         mode_two_panel = QFrame()
@@ -1218,7 +1350,7 @@ class MainWindow(QMainWindow):
         )
         w_only_panel = option_panel(
             "仅 W 模式参数",
-            "每轮只发送 W，不发送 S；每次 W 都使用下方长按时间。",
+            "每轮只发送 W，不发送 S；使用前必须将游戏镜头改为手动镜头。",
         )
         w_only_panel.layout().addWidget(
             recovery_control_grid(
@@ -1261,9 +1393,64 @@ class MainWindow(QMainWindow):
             )
         )
         layout.addWidget(recovery_card)
+
+        cleanup_card, cleanup_safety_card = self._build_inventory_cleanup_cards()
+        layout.addWidget(cleanup_card)
+        layout.addWidget(cleanup_safety_card)
+
         layout.addStretch(1)
         scroll.setWidget(canvas)
         return scroll
+
+    def _build_inventory_cleanup_cards(self) -> tuple[Card, Card]:
+        cleanup_card = Card()
+        cleanup_layout = QVBoxLayout(cleanup_card)
+        cleanup_layout.setContentsMargins(24, 22, 24, 22)
+        cleanup_layout.setSpacing(12)
+        cleanup_layout.addLayout(
+            self._card_heading(
+                "背包清理（实验性）",
+                "背包满时使用四类简单整理，完成后退出背包并恢复钓鱼。",
+            )
+        )
+        self.inventory_cleanup_check = QCheckBox(
+            "检测到背包已满后自动清理并继续钓鱼"
+        )
+        self.inventory_cleanup_check.setChecked(False)
+        self.inventory_cleanup_check.setToolTip(
+            "实验性不可逆操作；默认关闭，启用前必须确认风险"
+        )
+        cleanup_layout.addWidget(self.inventory_cleanup_check)
+
+        warning = QLabel(
+            "此功能可能永久分解或出售物品，也存在识别误判后误用“大胆整理”的风险。"
+            "请只在能够承担该风险时启用。"
+        )
+        warning.setObjectName("cardHint")
+        warning.setWordWrap(True)
+        cleanup_layout.addWidget(warning)
+
+        safety_card = Card()
+        safety_layout = QVBoxLayout(safety_card)
+        safety_layout.setContentsMargins(24, 22, 24, 22)
+        safety_layout.setSpacing(9)
+        safety_layout.addLayout(
+            self._card_heading(
+                "执行前安全检查",
+                "以下条件有一项不明确，清理流程就会停止。",
+            )
+        )
+        for text in (
+            "1. 先识别背包页和简单整理页，不按固定坐标盲点。",
+            "2. 关闭“大胆整理”后连续确认 3 帧。",
+            "3. 选择四类简单整理项目，再连续确认 3 帧。",
+            "4. 整理对象页、完成页和“已整理背包”提示逐页确认。",
+        ):
+            label = QLabel(text)
+            label.setObjectName("helper")
+            label.setWordWrap(True)
+            safety_layout.addWidget(label)
+        return cleanup_card, safety_card
 
     def _build_threshold_page(self) -> QScrollArea:
         scroll = QScrollArea()
@@ -1450,12 +1637,14 @@ class MainWindow(QMainWindow):
         card_layout = QVBoxLayout(card)
         card_layout.setContentsMargins(24, 22, 24, 24)
         card_layout.setSpacing(12)
-        card_layout.addLayout(self._card_heading("开始前检查", "一次正确校准比固定等待时间更可靠。"))
+        card_layout.addLayout(self._card_heading("使用前说明", "一次正确校准比固定等待时间更可靠。"))
         steps = [
-            "1. 在游戏内确认分辨率和画面模式，然后在“控制台”中选择对应配置。",
-            "2. 把鼠标停在右下角圆形钓鱼按钮的正中心，直接按 F7；不会弹出确认，也不会移动鼠标。",
-            "3. 用“检查识别区域”保存快照，确认圆形按钮没有被截断。",
-            "4. 游戏回到前台后点击“开始监测”或按 F8；Esc 会紧急停止监测。",
+            "1. 钓鱼前务必将宠物卸下，再开始校准和监测。",
+            "2. 在游戏内确认分辨率和画面模式，然后在“控制台”中选择对应配置。",
+            "3. 默认使用“指定窗口后台模式（推荐）”；确认目标是“瑪奇 Mobile”，找不到时手动选择。",
+            "4. 把鼠标停在右下角圆形钓鱼按钮的正中心，直接按 F7；不会弹出确认，也不会移动鼠标。",
+            "5. 用“检查识别区域”保存快照，确认圆形按钮没有被截断。",
+            "6. 点击“开始监测”或按 F8；前台模式需保持游戏在前台，Esc 会紧急停止监测。",
         ]
         for step in steps:
             label = QLabel(step)
@@ -1463,6 +1652,27 @@ class MainWindow(QMainWindow):
             label.setObjectName("helpStep")
             card_layout.addWidget(label)
         layout.addWidget(card)
+
+        fishing_modes = Card()
+        fishing_modes_layout = QVBoxLayout(fishing_modes)
+        fishing_modes_layout.setContentsMargins(24, 22, 24, 24)
+        fishing_modes_layout.setSpacing(9)
+        fishing_modes_layout.addLayout(
+            self._card_heading(
+                "钓鱼模式说明",
+                "在“钓鱼设置”中选择；三种模式只影响上钩后的收杆时机。",
+            )
+        )
+        for text in (
+            "模式 1 · 体力条反弹：确认中鱼图标并追踪角色头顶体力条，槽中点先变灰、再恢复绿色时收杆，对镜头和画面清晰度要求较高。若没有识别到反弹并出现跑鱼提示，会记录本轮上钩到跑鱼的时长 T；提前量为 T × 10%，但最少 1.0 秒、最多 2.0 秒，下一轮按 T − 提前量兜底。例如 14.0 秒跑鱼，会在 12.6 秒收杆；正常识别到反弹时不会等待计时。",
+            "模式 2 · 定时收鱼（推荐）：目标仍存在时按自定义等待秒数收杆，并受“最迟空格拉钩秒数”限制，适合优先稳定挂机。",
+            "模式 3 · 上钩立即收杆：识别到上钩图标便立即按 Space，不判断体力条，因此也可能收起垃圾。",
+        ):
+            label = QLabel(text)
+            label.setWordWrap(True)
+            label.setObjectName("helpStep")
+            fishing_modes_layout.addWidget(label)
+        layout.addWidget(fishing_modes)
 
         hotkeys = Card()
         hotkey_layout = QGridLayout(hotkeys)
@@ -1484,6 +1694,44 @@ class MainWindow(QMainWindow):
         layout.addStretch(1)
         scroll.setWidget(canvas)
         return scroll
+
+    def _build_voice_alert_card(self) -> Card:
+        card = Card()
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(24, 22, 24, 22)
+        layout.setSpacing(11)
+        layout.addLayout(
+            self._card_heading(
+                "语音提醒",
+                "按操作和异常状态播放提示；后续新增人物文件夹后会自动出现在音色列表。",
+            )
+        )
+
+        self.voice_alerts_check = QCheckBox("启用语音提醒")
+        self.voice_alerts_check.setChecked(True)
+        layout.addWidget(self.voice_alerts_check)
+
+        selection = QHBoxLayout()
+        selection.setSpacing(10)
+        voice_label = QLabel("提醒音色")
+        voice_label.setObjectName("formLabel")
+        selection.addWidget(voice_label)
+        self.voice_character_combo = ScrollSafeComboBox()
+        self.voice_character_combo.setMinimumWidth(180)
+        for character in self.voice_player.available_characters():
+            self.voice_character_combo.addItem(character, character)
+        if self.voice_character_combo.count() == 0:
+            self.voice_character_combo.addItem("未找到可用音色", "")
+        selection.addWidget(self.voice_character_combo, 1)
+        self.voice_preview_button = QPushButton("试听")
+        selection.addWidget(self.voice_preview_button)
+        layout.addLayout(selection)
+
+        self.voice_status = QLabel()
+        self.voice_status.setObjectName("helper")
+        self.voice_status.setWordWrap(True)
+        layout.addWidget(self.voice_status)
+        return card
 
     def _build_settings_page(self) -> QScrollArea:
         scroll = QScrollArea()
@@ -1518,6 +1766,7 @@ class MainWindow(QMainWindow):
         ok_credit.setWordWrap(True)
         identity_layout.addWidget(ok_credit)
         layout.addWidget(identity)
+        layout.addWidget(self._build_voice_alert_card())
 
         floating_card = Card()
         floating_layout = QVBoxLayout(floating_card)
@@ -1613,6 +1862,7 @@ class MainWindow(QMainWindow):
         self.update_status.setWordWrap(True)
         update_layout.addWidget(self.update_status)
         layout.addWidget(update_card)
+        layout.addWidget(self._build_debug_section())
 
         diagnostic_card = Card()
         diagnostic_layout = QVBoxLayout(diagnostic_card)
@@ -1647,6 +1897,63 @@ class MainWindow(QMainWindow):
         layout.addStretch(1)
         scroll.setWidget(canvas)
         return scroll
+
+    def _build_debug_section(self) -> Card:
+        debug_section = Card()
+        debug_layout = QVBoxLayout(debug_section)
+        debug_layout.setContentsMargins(24, 22, 24, 24)
+        debug_layout.setSpacing(14)
+        debug_layout.addLayout(
+            self._card_heading(
+                "调试",
+                "用于单独验证实验功能；后续调试项目会集中放在这里。",
+            )
+        )
+
+        self.inventory_cleanup_debug_option = QFrame()
+        self.inventory_cleanup_debug_option.setObjectName("debugOption")
+        test_layout = QVBoxLayout(self.inventory_cleanup_debug_option)
+        test_layout.setContentsMargins(18, 16, 18, 18)
+        test_layout.setSpacing(10)
+        option_title = QLabel("背包清理测试")
+        option_title.setObjectName("debugOptionTitle")
+        test_layout.addWidget(option_title)
+        option_hint = QLabel(
+            "从当前游戏画面真实执行一次完整清理，完成后保持监测暂停。"
+        )
+        option_hint.setObjectName("helper")
+        option_hint.setWordWrap(True)
+        test_layout.addWidget(option_hint)
+        danger = QLabel(
+            "这不是识别预览：测试会真实分解或出售物品，也存在误用“大胆整理”的风险。"
+        )
+        danger.setObjectName("cardHint")
+        danger.setWordWrap(True)
+        test_layout.addWidget(danger)
+
+        self.test_inventory_cleanup_button = QPushButton(
+            "测试背包清理流程"
+        )
+        self.test_inventory_cleanup_button.setObjectName("dangerButton")
+        test_layout.addWidget(self.test_inventory_cleanup_button)
+        self.inventory_cleanup_test_status = QLabel(
+            "请先启用“背包清理（实验性）”并完成 F7 校准。"
+        )
+        self.inventory_cleanup_test_status.setObjectName("helper")
+        self.inventory_cleanup_test_status.setWordWrap(True)
+        test_layout.addWidget(self.inventory_cleanup_test_status)
+        for text in (
+            "1. 暂停普通监测，让角色停在可正常打开背包的画面。",
+            "2. 不要提前打开背包；测试会从发送 I 键开始。",
+            "3. 后台模式不会移动真实鼠标；屏幕模式会移动并点击游戏界面。",
+            "4. 任一步超时或无法确认“大胆整理”关闭，测试会立即停止。",
+        ):
+            label = QLabel(text)
+            label.setObjectName("helper")
+            label.setWordWrap(True)
+            test_layout.addWidget(label)
+        debug_layout.addWidget(self.inventory_cleanup_debug_option)
+        return debug_section
 
     @staticmethod
     def _card_heading(title: str, hint: str = "") -> QVBoxLayout:
@@ -1869,12 +2176,54 @@ class MainWindow(QMainWindow):
             )
         else:
             self.target_mode_status.setText(
-                "稳定屏幕模式：识别与按键依赖洛奇 M 位于前台，不会在后台向其他窗口发送按键。"
+                "前台屏幕坐标模式：识别与按键依赖洛奇 M 位于前台，不会在后台向其他窗口发送按键。"
             )
 
     def _target_mode_changed(self) -> None:
         self._sync_target_mode_controls()
         self._save_profile()
+
+    def _voice_alerts_toggled(self, checked: bool) -> None:
+        character = str(self.voice_character_combo.currentData() or "")
+        self.engine.update_config(voice_alerts_enabled=checked)
+        self.voice_player.configure(checked, character)
+        self._sync_voice_controls()
+
+    def _voice_character_changed(self) -> None:
+        character = str(self.voice_character_combo.currentData() or "")
+        if character:
+            self.engine.update_config(voice_character=character)
+        self.voice_player.configure(
+            self.voice_alerts_check.isChecked(), character
+        )
+        self._sync_voice_controls()
+
+    def _preview_voice(self) -> None:
+        selected = self.voice_player.play(F7_CALIBRATION_CUE)
+        if selected is None:
+            self.voice_status.setText(
+                "当前音色没有可播放的 F7 定位语音，或相同提示仍在播放。"
+            )
+            return
+        self.voice_status.setText(f"正在试听：{selected.name}")
+
+    def _sync_voice_controls(self) -> None:
+        character = str(self.voice_character_combo.currentData() or "")
+        enabled = self.voice_alerts_check.isChecked()
+        has_pack = bool(character)
+        self.voice_character_combo.setEnabled(enabled and has_pack)
+        self.voice_preview_button.setEnabled(enabled and has_pack)
+        if not has_pack:
+            self.voice_status.setText(
+                "未找到语音包，请按 voice/人物名/事件名.wav 放置文件。"
+            )
+        elif not enabled:
+            self.voice_status.setText("语音提醒已关闭。")
+        else:
+            cue_count = len(self.voice_player.cues_for(character))
+            self.voice_status.setText(
+                f"当前音色：{character} · 已识别 {cue_count} 类提示"
+            )
 
     def _floating_status_toggled(self, checked: bool) -> None:
         self.engine.update_config(floating_status_enabled=checked)
@@ -1948,6 +2297,9 @@ class MainWindow(QMainWindow):
             self.recovery_forward_taps_spin,
             self.recovery_w_only_count_spin,
             self.recovery_w_only_hold_spin,
+            self.inventory_cleanup_check,
+            self.voice_alerts_check,
+            self.voice_character_combo,
             self.floating_status_check,
             self.floating_opacity_slider,
             self.github_auto_check,
@@ -1997,10 +2349,24 @@ class MainWindow(QMainWindow):
         self.recovery_w_only_hold_spin.setValue(
             config.recovery_w_only_hold_seconds
         )
+        self.inventory_cleanup_check.setChecked(
+            config.inventory_auto_cleanup_enabled
+        )
+        self.voice_alerts_check.setChecked(config.voice_alerts_enabled)
+        self._select_combo_data(
+            self.voice_character_combo, config.voice_character
+        )
         self.floating_status_check.setChecked(config.floating_status_enabled)
         self.floating_opacity_slider.setValue(config.floating_status_opacity)
         self.github_auto_check.setChecked(config.github_auto_check)
         del blockers
+        selected_voice = str(self.voice_character_combo.currentData() or "")
+        if selected_voice and selected_voice != config.voice_character:
+            self.engine.update_config(voice_character=selected_voice)
+        self.voice_player.configure(
+            config.voice_alerts_enabled,
+            selected_voice,
+        )
         self._sync_target_mode_controls()
         self._sync_auto_roi_controls()
         self._sync_catch_strategy_controls()
@@ -2009,6 +2375,9 @@ class MainWindow(QMainWindow):
         self._refresh_threshold_display(config.fish_red_pixel_threshold)
         self._sync_floating_status_controls()
         self._sync_floating_status_visibility()
+        self._sync_inventory_cleanup_debug_controls()
+        self._sync_voice_controls()
+
     def _connect_controls(self) -> None:
         self.monitor_combo.currentIndexChanged.connect(self._save_profile)
         self.mode_combo.currentIndexChanged.connect(self._save_profile)
@@ -2095,7 +2464,21 @@ class MainWindow(QMainWindow):
                 recovery_w_only_hold_seconds=float(value)
             )
         )
+        self.inventory_cleanup_check.toggled.connect(
+            self._inventory_cleanup_toggled
+        )
+        self.test_inventory_cleanup_button.clicked.connect(
+            self._test_inventory_cleanup
+        )
         self.restore_button.clicked.connect(self._restore_recommended_settings)
+
+        self.voice_alerts_check.toggled.connect(
+            self._voice_alerts_toggled
+        )
+        self.voice_character_combo.currentIndexChanged.connect(
+            self._voice_character_changed
+        )
+        self.voice_preview_button.clicked.connect(self._preview_voice)
 
         self.floating_status_check.toggled.connect(
             self._floating_status_toggled
@@ -2138,6 +2521,67 @@ class MainWindow(QMainWindow):
             else "检测到指南针状态时自动执行 W → S"
         )
 
+    def _inventory_cleanup_toggled(self, checked: bool) -> None:
+        if checked:
+            dialog = InventoryCleanupWarningDialog(self)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                blocker = QSignalBlocker(self.inventory_cleanup_check)
+                self.inventory_cleanup_check.setChecked(False)
+                del blocker
+                self.engine.update_config(
+                    inventory_auto_cleanup_enabled=False
+                )
+                self._sync_inventory_cleanup_debug_controls()
+                return
+        self.engine.update_config(inventory_auto_cleanup_enabled=checked)
+        self._sync_inventory_cleanup_debug_controls()
+
+    def _sync_inventory_cleanup_debug_controls(self) -> None:
+        config = self.engine.config()
+        calibrated = (
+            config.target_button_offset is not None
+            if config.capture_mode == "window"
+            else config.button_center is not None
+        )
+        monitoring = self.engine.is_monitoring()
+        enabled = config.inventory_auto_cleanup_enabled
+        self.test_inventory_cleanup_button.setEnabled(
+            enabled and calibrated and not monitoring
+        )
+        if not enabled:
+            message = "请先在“钓鱼设置 → 背包清理（实验性）”中启用功能。"
+        elif not calibrated:
+            message = "请先回到控制台完成 F7 校准。"
+        elif monitoring:
+            message = "当前监测或测试正在运行；暂停后才能开始新的清理测试。"
+        else:
+            message = "已就绪。点击后仍需再次确认，测试会真实整理物品。"
+        self.inventory_cleanup_test_status.setText(message)
+
+    def _test_inventory_cleanup(self) -> None:
+        config = self.engine.config()
+        if not config.inventory_auto_cleanup_enabled:
+            self.inventory_cleanup_test_status.setText(
+                "功能尚未启用，未开始测试。"
+            )
+            return
+        if self.engine.is_monitoring():
+            self.inventory_cleanup_test_status.setText(
+                "请先暂停普通监测，再开始测试。"
+            )
+            return
+        dialog = InventoryCleanupTestDialog(self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            self.inventory_cleanup_test_status.setText(
+                "已取消，未执行任何游戏操作。"
+            )
+            return
+        if self.engine.request_inventory_cleanup_test():
+            self.inventory_cleanup_test_status.setText(
+                "清理测试正在运行，请查看控制台状态和日志。"
+            )
+        self._sync_inventory_cleanup_debug_controls()
+
     def _fallback_delay_changed(self, value: float) -> None:
         self.engine.update_config(
             fallback_collect_delay_seconds=float(value)
@@ -2174,12 +2618,12 @@ class MainWindow(QMainWindow):
         learned = self.engine.config().learned_escape_seconds
         if learned <= 0:
             self.learned_escape_label.setText(
-                "尚未学习。识别到“讓牠跑掉了”后会自动记录本轮耗时。"
+                "当前记录：尚未学习。识别到“讓牠跑掉了”后会自动记录本轮耗时。"
             )
             return
         target, margin = FishingEngine.learned_collect_timing(learned)
         self.learned_escape_label.setText(
-            f"上次跑鱼 {learned:.1f} 秒；识别仍失败时将在 "
+            f"当前记录：上次跑鱼 {learned:.1f} 秒；识别仍失败时将在 "
             f"{target:.1f} 秒兜底（提前 {margin:.1f} 秒）。"
         )
 
@@ -2292,6 +2736,9 @@ class MainWindow(QMainWindow):
             ),
             stamina_scan_interval_ms=defaults.stamina_scan_interval_ms,
             stamina_zoom_in_steps=defaults.stamina_zoom_in_steps,
+            inventory_auto_cleanup_enabled=(
+                defaults.inventory_auto_cleanup_enabled
+            ),
         )
         self._load_config(self.engine.config())
         self._append_log("已恢复推荐识别参数。", EventKind.INFO)
@@ -2447,6 +2894,14 @@ class MainWindow(QMainWindow):
             self.red_progress.setMaximum(max(1, threshold))
 
     def _consume_engine_event(self, event: EngineEvent) -> None:
+        voice_cue = cue_for_engine_event(
+            event.kind,
+            event.message,
+            event.monitoring,
+        )
+        if voice_cue is not None:
+            self.voice_player.play(voice_cue)
+
         if event.kind == EventKind.METRIC:
             if event.recognition_source in {"ok_feature", "v2_signature", "compass_pixel"}:
                 confidence = max(0.0, min(1.0, event.recognition_confidence))
@@ -2521,17 +2976,25 @@ class MainWindow(QMainWindow):
         if event.kind == EventKind.STATE:
             if event.monitoring:
                 self.runtime_title.setText("监测中")
+                cleaning_inventory = event.message.startswith("自动清理背包")
                 self.runtime_detail.setText(
-                    "正在识别指定窗口区域（实验性后台模式）。"
-                    if self.engine.config().capture_mode == "window"
-                    else "正在识别右下角圆形按钮。"
+                    event.message
+                    if cleaning_inventory
+                    else (
+                        "正在识别指定窗口区域（推荐后台模式）。"
+                        if self.engine.config().capture_mode == "window"
+                        else "正在识别右下角圆形按钮。"
+                    )
                 )
                 self.start_button.setText("暂停监测")
                 self.start_button.setObjectName("dangerButton")
                 self.start_button.style().unpolish(self.start_button)
                 self.start_button.style().polish(self.start_button)
                 self._set_status("running", "●  监测运行中")
-                self._set_runtime_state("识别中", "running")
+                self._set_runtime_state(
+                    "清理背包" if cleaning_inventory else "识别中",
+                    "running",
+                )
             else:
                 self.runtime_title.setText("已暂停")
                 self.runtime_detail.setText("暂停期间不会发送按键。")
@@ -2559,6 +3022,8 @@ class MainWindow(QMainWindow):
             if event.debug_image is not None:
                 self.snapshot_status.setText("区域快照与识别诊断已保存")
             self._refresh_calibration_summary()
+        if hasattr(self, "test_inventory_cleanup_button"):
+            self._sync_inventory_cleanup_debug_controls()
 
     def _set_runtime_state(self, text: str, state: str = "idle") -> None:
         self.runtime_state_chip.setProperty("state", state)
@@ -2609,9 +3074,20 @@ class MainWindow(QMainWindow):
             event.type() == QEvent.Type.WindowStateChange
             and hasattr(self, "floating_status_bar")
         ):
+            old_state = event.oldState()  # type: ignore[attr-defined]
+            was_minimized = bool(
+                old_state & Qt.WindowState.WindowMinimized
+            )
+            is_minimized = self.isMinimized()
+            if hasattr(self, "voice_player"):
+                if is_minimized and not was_minimized:
+                    self.voice_player.play(WINDOW_MINIMIZED_CUE)
+                elif was_minimized and not is_minimized:
+                    self.voice_player.play(WINDOW_RESTORED_CUE)
             self._sync_floating_status_visibility()
 
     def closeEvent(self, event: object) -> None:  # type: ignore[override]
         self.floating_status_bar.close()
+        self.voice_player.close()
         self.engine.close()
         event.accept()  # type: ignore[union-attr]

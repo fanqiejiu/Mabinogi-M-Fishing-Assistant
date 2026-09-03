@@ -35,6 +35,15 @@ class ConfigRobustnessTests(unittest.TestCase):
     def test_json_list_config_falls_back_to_defaults(self) -> None:
         self.assertEqual(_load_raw_config("[1, 2, 3]"), default_config())
 
+    def test_window_capture_is_the_default_for_new_config(self) -> None:
+        self.assertEqual(default_config().capture_mode, "window")
+
+    def test_existing_screen_capture_preference_is_respected(self) -> None:
+        config = _load_raw_config(
+            json.dumps({"schema_version": 21, "capture_mode": "screen"})
+        )
+        self.assertEqual(config.capture_mode, "screen")
+
     def test_null_schema_version_falls_back_to_defaults(self) -> None:
         config = _load_raw_config(json.dumps({"schema_version": None}))
         self.assertEqual(config.schema_version, default_config().schema_version)
@@ -102,6 +111,39 @@ class ConfigRobustnessTests(unittest.TestCase):
         )
         self.assertEqual(too_low.floating_status_opacity, 35)
         self.assertEqual(too_high.floating_status_opacity, 100)
+
+    def test_inventory_auto_cleanup_defaults_off_for_old_config(self) -> None:
+        config = _load_raw_config(json.dumps({"schema_version": 20}))
+        self.assertFalse(config.inventory_auto_cleanup_enabled)
+
+    def test_inventory_auto_cleanup_preference_is_respected(self) -> None:
+        config = _load_raw_config(
+            json.dumps(
+                {
+                    "schema_version": 21,
+                    "inventory_auto_cleanup_enabled": True,
+                }
+            )
+        )
+        self.assertTrue(config.inventory_auto_cleanup_enabled)
+
+    def test_voice_alerts_default_on_for_old_config(self) -> None:
+        config = _load_raw_config(json.dumps({"schema_version": 21}))
+        self.assertTrue(config.voice_alerts_enabled)
+        self.assertEqual(config.voice_character, "新海天")
+
+    def test_voice_alert_preferences_are_respected(self) -> None:
+        config = _load_raw_config(
+            json.dumps(
+                {
+                    "schema_version": 22,
+                    "voice_alerts_enabled": False,
+                    "voice_character": "未来音色",
+                }
+            )
+        )
+        self.assertFalse(config.voice_alerts_enabled)
+        self.assertEqual(config.voice_character, "未来音色")
 
 
 class MonitorLoopRobustnessTests(unittest.TestCase):
@@ -373,6 +415,7 @@ class StrategySwitchTests(unittest.TestCase):
 
     def test_switching_to_instant_mid_hook_collects(self) -> None:
         config = AppConfig(
+            capture_mode="screen",
             catch_strategy="stamina_bounce",
             trigger_consecutive_frames=1,
             press_cooldown_ms=0,

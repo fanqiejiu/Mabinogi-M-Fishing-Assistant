@@ -53,7 +53,7 @@ class FishingEngineTests(unittest.TestCase):
             with patch("fishing_assistant.config.CONFIG_PATH", config_path):
                 config = load_config()
 
-        self.assertEqual(config.schema_version, 20)
+        self.assertEqual(config.schema_version, 22)
         self.assertEqual(config.recognition_backend, "ok")
         self.assertEqual(config.runtime_error_retry_count, 5)
         self.assertTrue(config.auto_scale_roi)
@@ -69,6 +69,7 @@ class FishingEngineTests(unittest.TestCase):
         self.assertEqual(config.recovery_w_only_hold_seconds, 0.5)
         self.assertTrue(config.floating_status_enabled)
         self.assertEqual(config.floating_status_opacity, 92)
+        self.assertFalse(config.inventory_auto_cleanup_enabled)
 
     def test_integer_fixed_delay_migrates_to_float(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -85,7 +86,7 @@ class FishingEngineTests(unittest.TestCase):
             with patch("fishing_assistant.config.CONFIG_PATH", config_path):
                 config = load_config()
 
-        self.assertEqual(config.schema_version, 20)
+        self.assertEqual(config.schema_version, 22)
         self.assertEqual(config.fallback_collect_delay_seconds, 5.0)
         self.assertIsInstance(config.fallback_collect_delay_seconds, float)
         self.assertEqual(config.fixed_delay_latest_collect_seconds, 10.5)
@@ -252,6 +253,7 @@ class FishingEngineTests(unittest.TestCase):
 
     def test_f8_start_arms_cast_and_ready_icon_casts_once(self) -> None:
         config = AppConfig(
+            capture_mode="screen",
             button_center=(1700, 900),
             catch_strategy="instant",
         )
@@ -271,6 +273,7 @@ class FishingEngineTests(unittest.TestCase):
 
     def test_startup_idle_recovery_casts_on_rod_without_second_ws(self) -> None:
         config = AppConfig(
+            capture_mode="screen",
             button_center=(1700, 900),
             catch_strategy="instant",
             recovery_consecutive_frames=1,
@@ -299,6 +302,7 @@ class FishingEngineTests(unittest.TestCase):
 
     def test_startup_compass_uses_short_probe_then_casts_on_rod(self) -> None:
         config = AppConfig(
+            capture_mode="screen",
             button_center=(1700, 900),
             catch_strategy="instant",
             recovery_consecutive_frames=8,
@@ -497,6 +501,7 @@ class FishingEngineTests(unittest.TestCase):
 
     def test_fixed_delay_mode_collects_then_recasts_automatically(self) -> None:
         config = AppConfig(
+            capture_mode="screen",
             catch_strategy="fixed_delay",
             fallback_collect_delay_seconds=0,
             trigger_consecutive_frames=1,
@@ -590,6 +595,7 @@ class FishingEngineTests(unittest.TestCase):
 
     def test_instant_mode_collects_as_soon_as_hook_is_detected(self) -> None:
         config = AppConfig(
+            capture_mode="screen",
             catch_strategy="instant",
             trigger_consecutive_frames=1,
             press_cooldown_ms=0,
@@ -601,6 +607,7 @@ class FishingEngineTests(unittest.TestCase):
 
     def test_mode_one_false_hook_without_stamina_never_collects_or_recasts(self) -> None:
         config = AppConfig(
+            capture_mode="screen",
             catch_strategy="stamina_bounce",
             trigger_consecutive_frames=1,
             clear_consecutive_frames=1,
@@ -620,6 +627,7 @@ class FishingEngineTests(unittest.TestCase):
 
     def test_stamina_midpoint_must_turn_dark_then_green_before_collecting(self) -> None:
         config = AppConfig(
+            capture_mode="screen",
             catch_strategy="stamina_bounce",
             trigger_consecutive_frames=1,
             press_cooldown_ms=0,
@@ -645,6 +653,7 @@ class FishingEngineTests(unittest.TestCase):
 
     def test_midpoint_tracking_can_start_after_bar_is_already_dark(self) -> None:
         config = AppConfig(
+            capture_mode="screen",
             catch_strategy="stamina_bounce",
             trigger_consecutive_frames=1,
             press_cooldown_ms=0,
@@ -686,6 +695,7 @@ class FishingEngineTests(unittest.TestCase):
 
     def test_single_frame_color_jitter_does_not_collect(self) -> None:
         config = AppConfig(
+            capture_mode="screen",
             catch_strategy="stamina_bounce",
             trigger_consecutive_frames=1,
             press_cooldown_ms=0,
@@ -772,7 +782,7 @@ class FishingEngineTests(unittest.TestCase):
         )
 
     def test_three_unconfirmed_casts_arm_rod_status_scan(self) -> None:
-        config = AppConfig(button_center=(1700, 900))
+        config = AppConfig(capture_mode="screen", button_center=(1700, 900))
         engine = FishingEngine()
         with patch("fishing_assistant.engine.pyautogui.press") as press:
             for attempt in range(FishingEngine.BLOCKING_MESSAGE_RETRY_THRESHOLD):
@@ -1002,6 +1012,7 @@ class FishingEngineTests(unittest.TestCase):
 
     def test_learned_time_collects_even_when_stamina_is_not_found(self) -> None:
         config = AppConfig(
+            capture_mode="screen",
             catch_strategy="stamina_bounce",
             learned_escape_seconds=14.0,
             trigger_consecutive_frames=1,
@@ -1088,6 +1099,7 @@ class FishingEngineTests(unittest.TestCase):
 
     def test_midpoint_sequence_continues_when_hook_icon_temporarily_misses(self) -> None:
         config = AppConfig(
+            capture_mode="screen",
             catch_strategy="stamina_bounce",
             trigger_consecutive_frames=1,
             clear_consecutive_frames=2,
@@ -1139,7 +1151,11 @@ class FishingEngineTests(unittest.TestCase):
         self.assertEqual(sample.center, (411, 158))  # type: ignore[union-attr]
 
     def test_mode_one_uses_physical_up_scroll_in_screen_mode(self) -> None:
-        config = AppConfig(catch_strategy="stamina_bounce", stamina_zoom_in_steps=5)
+        config = AppConfig(
+            capture_mode="screen",
+            catch_strategy="stamina_bounce",
+            stamina_zoom_in_steps=5,
+        )
         engine = FishingEngine()
         target = WindowInfo(100, "瑪奇 Mobile", 0, 0, 1920, 1080)
         with patch("fishing_assistant.engine.pyautogui.scroll") as scroll, patch(
@@ -1170,7 +1186,7 @@ class FishingEngineTests(unittest.TestCase):
         activate.assert_called_once_with(target.handle)
         scroll.assert_called_once_with(5)
     def test_f7_recalibration_while_running_rearms_cast(self) -> None:
-        config = AppConfig(button_center=(1700, 900))
+        config = AppConfig(capture_mode="screen", button_center=(1700, 900))
         engine = FishingEngine()
         engine._config = config  # type: ignore[attr-defined]
         engine._enabled.set()  # type: ignore[attr-defined]
@@ -1212,6 +1228,7 @@ class FishingEngineTests(unittest.TestCase):
         self.assertGreater(moved.center[0], first.center[0])  # type: ignore[union-attr]
     def test_idle_pointer_runs_ws_then_recasts(self) -> None:
         config = AppConfig(
+            capture_mode="screen",
             recovery_consecutive_frames=1,
             recovery_cooldown_ms=0,
             recovery_pause_ms=0,

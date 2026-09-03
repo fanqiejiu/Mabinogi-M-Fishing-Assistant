@@ -10,10 +10,19 @@ from unittest.mock import MagicMock, patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QDialog, QLabel, QTextBrowser
+from PySide6.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QDialog,
+    QFrame,
+    QLabel,
+    QTextBrowser,
+)
 
 from fishing_assistant.ui import (
     FloatingStatusBar,
+    InventoryCleanupTestDialog,
+    InventoryCleanupWarningDialog,
     MainWindow,
     ScrollSafeComboBox,
     ScrollSafeDoubleSpinBox,
@@ -51,6 +60,83 @@ class UiRegressionTests(unittest.TestCase):
             event = _IgnoredWheelEvent()
             control.wheelEvent(event)  # type: ignore[arg-type]
             self.assertTrue(event.ignored, type(control).__name__)
+
+    def test_inventory_cleanup_is_part_of_fishing_settings_navigation(self) -> None:
+        titles = [title for _eyebrow, title, _subtitle in MainWindow.PAGE_META]
+        self.assertEqual(
+            titles,
+            ["钓鱼控制台", "钓鱼设置", "识别阈值", "应用设置", "使用说明"],
+        )
+        self.assertNotIn("背包清理（实验性）", titles)
+
+        owner = SimpleNamespace(_card_heading=MainWindow._card_heading)
+        cleanup_card, safety_card = MainWindow._build_inventory_cleanup_cards(  # type: ignore[arg-type]
+            owner
+        )
+        try:
+            labels = "\n".join(
+                label.text()
+                for card in (cleanup_card, safety_card)
+                for label in card.findChildren(QLabel)
+            )
+            self.assertIn("背包清理（实验性）", labels)
+            self.assertIn("执行前安全检查", labels)
+        finally:
+            cleanup_card.close()
+            safety_card.close()
+
+    def test_voice_alerts_are_a_top_level_settings_card(self) -> None:
+        voice_player = MagicMock()
+        voice_player.available_characters.return_value = ("新海天",)
+        owner = SimpleNamespace(
+            _card_heading=MainWindow._card_heading,
+            voice_player=voice_player,
+        )
+        card = MainWindow._build_voice_alert_card(owner)  # type: ignore[arg-type]
+        try:
+            labels = "\n".join(
+                label.text() for label in card.findChildren(QLabel)
+            )
+            self.assertIn("语音提醒", labels)
+            self.assertIn("提醒音色", labels)
+            self.assertNotIn("文件名会自动对应", labels)
+            self.assertEqual(owner.voice_character_combo.currentData(), "新海天")
+            self.assertTrue(owner.voice_alerts_check.isChecked())
+        finally:
+            card.close()
+
+    def test_disabling_voice_is_saved_and_stops_pending_playback(self) -> None:
+        owner = SimpleNamespace(
+            engine=MagicMock(),
+            voice_player=MagicMock(),
+            voice_character_combo=MagicMock(),
+            _sync_voice_controls=MagicMock(),
+        )
+        owner.voice_character_combo.currentData.return_value = "新海天"
+
+        MainWindow._voice_alerts_toggled(owner, False)  # type: ignore[arg-type]
+
+        owner.engine.update_config.assert_called_once_with(
+            voice_alerts_enabled=False
+        )
+        owner.voice_player.configure.assert_called_once_with(False, "新海天")
+        owner._sync_voice_controls.assert_called_once_with()
+
+    def test_help_page_explains_all_three_fishing_modes(self) -> None:
+        owner = SimpleNamespace(_card_heading=MainWindow._card_heading)
+        page = MainWindow._build_help_page(owner)  # type: ignore[arg-type]
+        try:
+            labels = "\n".join(label.text() for label in page.findChildren(QLabel))
+            self.assertIn("使用前说明", labels)
+            self.assertIn("钓鱼前务必将宠物卸下", labels)
+            self.assertIn("钓鱼模式说明", labels)
+            self.assertIn("模式 1 · 体力条反弹", labels)
+            self.assertNotIn("模式 1 · 计时计算", labels)
+            self.assertIn("14.0 秒跑鱼，会在 12.6 秒收杆", labels)
+            self.assertIn("模式 2 · 定时收鱼（推荐）", labels)
+            self.assertIn("模式 3 · 上钩立即收杆", labels)
+        finally:
+            page.close()
 
     def test_floating_status_bar_is_compact_topmost_and_updates(self) -> None:
         bar = FloatingStatusBar()
@@ -134,6 +220,7 @@ class UiRegressionTests(unittest.TestCase):
                 capture_mode="window",
                 target_button_offset=(1600, 860),
                 floating_status_enabled=True,
+                voice_alerts_enabled=False,
             )
         }
         engine = MagicMock()
@@ -273,10 +360,122 @@ class UiRegressionTests(unittest.TestCase):
         try:
             self.assertTrue(dialog.isModal())
             self.assertFalse(dialog.confirm_button.isEnabled())
+            labels = "\n".join(
+                label.text() for label in dialog.findChildren(QLabel)
+            )
+            self.assertIn("手动镜头", labels)
+            self.assertIn("手动镜头", dialog.acknowledge_check.text())
             dialog.acknowledge_check.setChecked(True)
             self.assertTrue(dialog.confirm_button.isEnabled())
         finally:
             dialog.close()
+
+    def test_inventory_cleanup_warning_requires_acknowledgement(self) -> None:
+        dialog = InventoryCleanupWarningDialog()
+        try:
+            self.assertTrue(dialog.isModal())
+            self.assertFalse(dialog.confirm_button.isEnabled())
+            labels = "\n".join(
+                label.text() for label in dialog.findChildren(QLabel)
+            )
+            self.assertIn("误用“大胆整理”", labels)
+            dialog.acknowledge_check.setChecked(True)
+            self.assertTrue(dialog.confirm_button.isEnabled())
+        finally:
+            dialog.close()
+
+    def test_inventory_cleanup_debug_warning_requires_acknowledgement(self) -> None:
+        dialog = InventoryCleanupTestDialog()
+        try:
+            self.assertTrue(dialog.isModal())
+            self.assertFalse(dialog.confirm_button.isEnabled())
+            dialog.acknowledge_check.setChecked(True)
+            self.assertTrue(dialog.confirm_button.isEnabled())
+        finally:
+            dialog.close()
+
+    def test_debug_section_contains_inventory_cleanup_as_child_option(self) -> None:
+        owner = SimpleNamespace(_card_heading=MainWindow._card_heading)
+        section = MainWindow._build_debug_section(owner)  # type: ignore[arg-type]
+        try:
+            section_labels = "\n".join(
+                label.text() for label in section.findChildren(QLabel)
+            )
+            self.assertIn("调试", section_labels)
+            option = section.findChild(QFrame, "debugOption")
+            self.assertIsNotNone(option)
+            option_labels = "\n".join(
+                label.text() for label in option.findChildren(QLabel)
+            )
+            self.assertIn("背包清理测试", option_labels)
+            self.assertNotIn("调试 · 背包清理测试", section_labels)
+        finally:
+            section.close()
+
+    def test_cancelled_inventory_cleanup_stays_disabled(self) -> None:
+        check = QCheckBox()
+        check.setChecked(True)
+        owner = SimpleNamespace(
+            inventory_cleanup_check=check,
+            engine=MagicMock(),
+            _sync_inventory_cleanup_debug_controls=MagicMock(),
+        )
+        with patch(
+            "fishing_assistant.ui.InventoryCleanupWarningDialog"
+        ) as dialog_type:
+            dialog_type.return_value.exec.return_value = (
+                QDialog.DialogCode.Rejected
+            )
+            MainWindow._inventory_cleanup_toggled(  # type: ignore[arg-type]
+                owner, True
+            )
+
+        self.assertFalse(check.isChecked())
+        owner.engine.update_config.assert_called_once_with(
+            inventory_auto_cleanup_enabled=False
+        )
+
+    def test_acknowledged_inventory_cleanup_is_saved(self) -> None:
+        owner = SimpleNamespace(
+            inventory_cleanup_check=MagicMock(),
+            engine=MagicMock(),
+            _sync_inventory_cleanup_debug_controls=MagicMock(),
+        )
+        with patch(
+            "fishing_assistant.ui.InventoryCleanupWarningDialog"
+        ) as dialog_type:
+            dialog_type.return_value.exec.return_value = (
+                QDialog.DialogCode.Accepted
+            )
+            MainWindow._inventory_cleanup_toggled(  # type: ignore[arg-type]
+                owner, True
+            )
+
+        owner.engine.update_config.assert_called_once_with(
+            inventory_auto_cleanup_enabled=True
+        )
+
+    def test_debug_cleanup_requires_second_confirmation(self) -> None:
+        owner = SimpleNamespace(
+            engine=MagicMock(),
+            inventory_cleanup_test_status=MagicMock(),
+            _sync_inventory_cleanup_debug_controls=MagicMock(),
+        )
+        owner.engine.config.return_value = SimpleNamespace(
+            inventory_auto_cleanup_enabled=True
+        )
+        owner.engine.is_monitoring.return_value = False
+        owner.engine.request_inventory_cleanup_test.return_value = True
+        with patch(
+            "fishing_assistant.ui.InventoryCleanupTestDialog"
+        ) as dialog_type:
+            dialog_type.return_value.exec.return_value = (
+                QDialog.DialogCode.Accepted
+            )
+            MainWindow._test_inventory_cleanup(owner)  # type: ignore[arg-type]
+
+        owner.engine.request_inventory_cleanup_test.assert_called_once_with()
+        owner._sync_inventory_cleanup_debug_controls.assert_called_once_with()
 
     def test_cancelled_w_only_switch_returns_to_default_ws(self) -> None:
         combo = ScrollSafeComboBox()
