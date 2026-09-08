@@ -7,11 +7,14 @@ import threading
 import unittest
 from pathlib import Path
 
-from fishing_assistant.engine import EventKind
+from pynput import keyboard
+
+from fishing_assistant.engine import EventKind, FishingEngine
 from fishing_assistant.voice_alerts import (
     CRITICAL_STOP_CUE,
     F7_CALIBRATION_CUE,
     F8_START_CUE,
+    F8_STOP_CUE,
     INVENTORY_CLEANED_CUE,
     RECOGNITION_FAILED_CUE,
     VoiceAlertPlayer,
@@ -92,6 +95,83 @@ class VoicePackTests(unittest.TestCase):
             finally:
                 release.set()
                 player.close()
+
+
+    def test_pause_discards_waiting_alerts_and_still_plays_stop_cue(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            character = root / "新海天"
+            character.mkdir()
+            for cue in (F7_CALIBRATION_CUE, RECOGNITION_FAILED_CUE, F8_STOP_CUE):
+                (character / f"{cue}.wav").touch()
+            started = threading.Event()
+            release = threading.Event()
+            played: list[str] = []
+
+            def blocking_play(path: Path) -> None:
+                played.append(path.stem)
+                if path.stem == F7_CALIBRATION_CUE:
+                    started.set()
+                    release.wait(2.0)
+
+            player = VoiceAlertPlayer(root, play_file=blocking_play)
+            try:
+                player.configure(True, "新海天")
+                player.play(F7_CALIBRATION_CUE)
+                self.assertTrue(started.wait(1.0))
+                self.assertIsNotNone(player.play(RECOGNITION_FAILED_CUE))
+                player.clear_pending()
+                self.assertIsNotNone(player.play(F8_STOP_CUE))
+                release.set()
+                self.assertTrue(player.wait_until_idle())
+                self.assertEqual(played, [F7_CALIBRATION_CUE, F8_STOP_CUE])
+            finally:
+                release.set()
+                player.close()
+                player.wait_until_idle()
+
+
+class PausedHotkeyVoiceTests(unittest.TestCase):
+    def test_f8_pause_then_game_keys_emit_no_more_events(self) -> None:
+        events = []
+        engine = FishingEngine(events.append)
+        engine._enabled.set()
+        engine._on_key_press(keyboard.Key.f8)
+        self.assertFalse(engine.is_monitoring())
+        self.assertEqual(len(events), 1)
+        pause = events[0]
+        self.assertEqual(
+            cue_for_engine_event(pause.kind, pause.message, pause.monitoring),
+            F8_STOP_CUE,
+        )
+        events.clear()
+        for _ in range(3):
+            for key in (
+                keyboard.KeyCode.from_char("w"),
+                keyboard.KeyCode.from_char("s"),
+                keyboard.Key.esc,
+            ):
+                engine._on_key_press(key)
+        self.assertFalse(engine.is_monitoring())
+        self.assertEqual(events, [])
+
+    def test_running_esc_still_stops_once_including_debug_test(self) -> None:
+        for cleanup_test in (False, True):
+            with self.subTest(cleanup_test=cleanup_test):
+                events = []
+                engine = FishingEngine(events.append)
+                engine._enabled.set()
+                if cleanup_test:
+                    engine._cleanup_test_requested.set()
+                engine._on_key_press(keyboard.Key.esc)
+                engine._on_key_press(keyboard.Key.esc)
+                self.assertFalse(engine.is_monitoring())
+                self.assertFalse(engine._cleanup_test_requested.is_set())
+                cues = [
+                    cue_for_engine_event(event.kind, event.message, event.monitoring)
+                    for event in events
+                ]
+                self.assertEqual(cues, [F8_STOP_CUE, CRITICAL_STOP_CUE])
 
 
 class VoiceEventMappingTests(unittest.TestCase):

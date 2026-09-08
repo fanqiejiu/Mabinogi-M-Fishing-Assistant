@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 from datetime import datetime
+from pathlib import Path
 
 import mss
 from PySide6.QtCore import QEvent, QLocale, QSignalBlocker, Qt, QUrl, Signal
@@ -72,6 +73,7 @@ from .system_profile import SystemProfile, collect_system_profile
 from .updates import UpdateResult, check_github_release
 from .voice_alerts import (
     F7_CALIBRATION_CUE,
+    F8_STOP_CUE,
     WINDOW_MINIMIZED_CUE,
     WINDOW_RESTORED_CUE,
     VoiceAlertPlayer,
@@ -732,6 +734,8 @@ class MainWindow(QMainWindow):
         self._notified_release_version: str | None = None
         self._update_dialog: UpdateAvailableDialog | None = None
         self._auto_detected_game_window: window_target.WindowInfo | None = None
+        self._last_snapshot_path: Path | None = None
+        self._last_snapshot_bundle: Path | None = None
         self.floating_status_bar = FloatingStatusBar()
 
         self.setWindowTitle(APP_NAME)
@@ -1054,12 +1058,20 @@ class MainWindow(QMainWindow):
         layout.addLayout(shortcuts)
         layout.addStretch(1)
 
-        debug_row = QHBoxLayout()
-        self.snapshot_status = QLabel("尚未保存区域快照")
+        self.snapshot_status = QLabel("识别不对时按 F9，保存当时的截图和诊断。")
         self.snapshot_status.setObjectName("cardHint")
-        self.snapshot_button = QPushButton("检查识别区域")
-        debug_row.addWidget(self.snapshot_status, 1)
+        self.snapshot_status.setWordWrap(True)
+        layout.addWidget(self.snapshot_status)
+        debug_row = QHBoxLayout()
+        self.snapshot_button = QPushButton("保存识别现场（F9）")
+        self.snapshot_button.setToolTip("先按 F7 校准；保存截图和诊断，不会开始钓鱼或自动上传。")
+        self.view_snapshot_button = QPushButton("查看截图")
+        self.view_snapshot_button.setEnabled(False)
+        self.open_snapshot_folder_button = QPushButton("打开诊断目录")
         debug_row.addWidget(self.snapshot_button)
+        debug_row.addWidget(self.view_snapshot_button)
+        debug_row.addWidget(self.open_snapshot_folder_button)
+        debug_row.addStretch(1)
         layout.addLayout(debug_row)
         return card
 
@@ -1644,7 +1656,7 @@ class MainWindow(QMainWindow):
             "2. 在游戏内确认分辨率和画面模式，然后在“控制台”中选择对应配置。",
             "3. 默认使用“指定窗口后台模式（推荐）”；确认目标是“瑪奇 Mobile”，找不到时手动选择。",
             "4. 把鼠标停在右下角圆形钓鱼按钮的正中心，直接按 F7；不会弹出确认，也不会移动鼠标。",
-            "5. 用“检查识别区域”保存快照，确认圆形按钮没有被截断。",
+            "5. 按 F9 保存识别现场，回到控制台点“查看截图”，确认圆形按钮没有被截断。",
             "6. 点击“开始监测”或按 F8；前台模式需保持游戏在前台，Esc 会紧急停止监测。",
         ]
         for step in steps:
@@ -1674,6 +1686,25 @@ class MainWindow(QMainWindow):
             label.setObjectName("helpStep")
             fishing_modes_layout.addWidget(label)
         layout.addWidget(fishing_modes)
+
+        diagnostic_help = Card()
+        diagnostic_help_layout = QVBoxLayout(diagnostic_help)
+        diagnostic_help_layout.setContentsMargins(24, 22, 24, 24)
+        diagnostic_help_layout.setSpacing(9)
+        diagnostic_help_layout.addLayout(self._card_heading("F9 · 保存识别现场"))
+        for text in (
+            "有什么用：保存按钮截图、完整画面和识别报告，方便排查图标漏识别、体力条不触发或分辨率不匹配；不是修复键，也不会替你重新校准。",
+            "怎么用：先按 F7 校准；遇到问题时保留当时的游戏画面，按一次 F9。开始前或暂停后也能保存，无需按 F8。",
+            "前台模式：保持游戏在前台再按 F9，避免把助手窗口或其他程序截进去。后台模式：只读取选定窗口，游戏不能最小化。",
+            "保存后：控制台会显示结果，可点“查看截图”检查按钮是否完整，或点“打开诊断目录”找到最新 ZIP。保存期间不会重复排队，F8 / Esc 仍可使用。",
+            "文件内容：ZIP 内的 roi.png 是识别区域，frame.png 是同一时刻的完整画面，report.json 是分辨率、校准位置与分层识别报告。每次按时间分别保存，不覆盖上一次。",
+            "隐私提醒：文件仅保存在本机，不会自动上传。前台模式会截取所选显示器，分享 ZIP 前请检查角色名、聊天和其他不想公开的内容。",
+        ):
+            label = QLabel(text)
+            label.setWordWrap(True)
+            label.setObjectName("helpStep")
+            diagnostic_help_layout.addWidget(label)
+        layout.addWidget(diagnostic_help)
 
         hotkeys = Card()
         hotkey_layout = QGridLayout(hotkeys)
@@ -2389,7 +2420,9 @@ class MainWindow(QMainWindow):
         self.refresh_windows_button.clicked.connect(self._refresh_target_windows)
         self.calibrate_button.clicked.connect(self._calibrate)
         self.start_button.clicked.connect(self._toggle_monitoring)
-        self.snapshot_button.clicked.connect(self.engine.save_debug_capture)
+        self.snapshot_button.clicked.connect(self.engine.request_debug_capture)
+        self.view_snapshot_button.clicked.connect(self._view_snapshot)
+        self.open_snapshot_folder_button.clicked.connect(self._open_snapshot_directory)
         self.theme_button.clicked.connect(self._toggle_theme)
         self.recognition_backend_combo.currentIndexChanged.connect(
             self._recognition_backend_changed
@@ -2778,7 +2811,10 @@ class MainWindow(QMainWindow):
         self.update_status.setText("正在检查 GitHub Latest Release…")
 
         def worker() -> None:
-            result = check_github_release(repository, APP_VERSION)
+            try:
+                result = check_github_release(repository, APP_VERSION)
+            except Exception as error:
+                result = UpdateResult(False, f"检查更新失败，请稍后重试：{error}")
             if not result.ok:
                 record_error(
                     "GitHub update check",
@@ -2839,6 +2875,27 @@ class MainWindow(QMainWindow):
         )
         self._append_log("已生成本地诊断包；不会自动上传。", EventKind.INFO)
 
+    def _view_snapshot(self) -> None:
+        path = self._last_snapshot_path
+        if path is None or not path.is_file():
+            self.snapshot_status.setText("截图不存在或已被移动，请重新按 F9 保存。")
+            self.view_snapshot_button.setEnabled(False)
+            return
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
+            self.snapshot_status.setText("无法打开图片查看器，请从诊断目录手动打开截图。")
+
+    def _open_snapshot_directory(self) -> None:
+        directory = (
+            self._last_snapshot_bundle.parent
+            if self._last_snapshot_bundle else VISION_DIAGNOSTICS_DIR
+        )
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(directory))):
+                raise OSError("系统未能打开目录")
+        except OSError as error:
+            self.snapshot_status.setText(f"无法打开诊断目录：{error}")
+
     def _open_log_directory(self) -> None:
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(LOG_DIR)))
@@ -2889,11 +2946,39 @@ class MainWindow(QMainWindow):
             self.red_progress.setMaximum(max(1, threshold))
 
     def _consume_engine_event(self, event: EngineEvent) -> None:
+        if event.kind == EventKind.DIAGNOSTIC:
+            saving = event.snapshot_state == "saving"
+            self.snapshot_button.setEnabled(not saving)
+            self.snapshot_button.setText("正在保存…" if saving else "保存识别现场（F9）")
+            if saving:
+                self.view_snapshot_button.setEnabled(False)
+                self.snapshot_status.setText("正在保存识别现场…F8 / Esc 仍可使用。")
+            else:
+                self._last_snapshot_path = event.debug_image
+                self._last_snapshot_bundle = event.diagnostic_path
+                self.view_snapshot_button.setEnabled(event.debug_image is not None)
+                self.snapshot_status.setText(
+                    "截图和诊断包已保存，仅保存在本机。"
+                    if event.snapshot_state == "saved" else event.message
+                )
+            self.snapshot_status.setToolTip(event.message)
+            self._append_log(
+                event.message,
+                EventKind.WARNING if event.snapshot_state in {"failed", "partial"} else EventKind.INFO,
+            )
+            return
+        # Qt 信号可能晚于 F8 暂停到达，不让旧指标把状态栏改回“运行中”。
+        if event.kind == EventKind.METRIC and not self.engine.is_monitoring():
+            return
+        if event.kind == EventKind.STATE and event.monitoring != self.engine.is_monitoring():
+            return
         voice_cue = cue_for_engine_event(
             event.kind,
             event.message,
             event.monitoring,
         )
+        if voice_cue == F8_STOP_CUE:
+            self.voice_player.clear_pending()
         if voice_cue is not None:
             self.voice_player.play(voice_cue)
 
@@ -2971,7 +3056,9 @@ class MainWindow(QMainWindow):
         if event.kind == EventKind.STATE:
             if event.monitoring:
                 self.runtime_title.setText("监测中")
-                cleaning_inventory = event.message.startswith("自动清理背包")
+                cleaning_inventory = event.message.startswith(
+                    ("自动清理背包", "背包清理调试")
+                )
                 self.runtime_detail.setText(
                     event.message
                     if cleaning_inventory
@@ -3004,6 +3091,11 @@ class MainWindow(QMainWindow):
             self._set_runtime_state("需要处理", "warning")
             self.runtime_detail.setText(event.message)
         elif event.kind == EventKind.ERROR:
+            if self.engine.is_monitoring():
+                # 保存快照等辅助操作报错不等于钓鱼线程已经停止。
+                self._set_status("warning", "●  运行中 · 需要注意")
+                self.runtime_detail.setText(event.message)
+                return
             self._set_status("warning", "●  识别已暂停")
             self._set_runtime_state("已停止", "warning")
             self.runtime_detail.setText(event.message)

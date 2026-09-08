@@ -338,6 +338,7 @@ def write_snapshot(
     environment: dict[str, Any] | None,
     pipeline: PipelineCheck | None,
     config_summary: dict[str, Any] | None,
+    roi_bgr: np.ndarray | None = None,
 ) -> Path:
     """把报告和完整捕获帧写入本地 ZIP；不会执行网络请求。"""
     from ..constants import APP_VERSION
@@ -364,12 +365,17 @@ def write_snapshot(
             bundle.writestr(
                 "README.txt",
                 "此诊断包只保存在本机，不会自动上传。\n"
-                "frame.png 可能包含角色名或聊天内容，发送前请自行确认。\n",
+                "frame.png 为完整画面，roi.png（如有）为本次校准点周围的识别区域。\n"
+                "report.json 记录分辨率、校准位置、识别配置和分层检查结果。\n"
+                "完整画面可能包含角色名、聊天或其他屏幕内容，发送前请自行确认。\n",
             )
-            if isinstance(frame_bgr, np.ndarray) and frame_bgr.size:
+            for name, pixels in (("frame.png", frame_bgr), ("roi.png", roi_bgr)):
+                if not isinstance(pixels, np.ndarray) or not pixels.size:
+                    continue
                 import cv2
 
-                encoded_ok, encoded = cv2.imencode(".png", frame_bgr[:, :, :3])
-                if encoded_ok:
-                    bundle.writestr("frame.png", encoded.tobytes())
+                encoded_ok, encoded = cv2.imencode(".png", pixels[:, :, :3])
+                if not encoded_ok:
+                    raise RuntimeError(f"无法编码诊断截图：{name}")
+                bundle.writestr(name, encoded.tobytes())
     return path

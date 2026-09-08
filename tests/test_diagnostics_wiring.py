@@ -7,7 +7,7 @@
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 
@@ -150,14 +150,17 @@ class CorrectedDiagnosticIntegrationTest(unittest.TestCase):
             "fishing_assistant.window_target", fromlist=["WindowInfo"]
         ).WindowInfo(101, "瑪奇 Mobile", 100, 50, 1918, 1030)
         full_frame = np.zeros((1030, 1918, 4), dtype=np.uint8)
+        backend = MagicMock()
+        backend.capture_frame.return_value = full_frame
         with patch.object(engine, "_resolve_target_window", return_value=target):
             with patch.object(
-                engine, "_capture_stamina_frame", return_value=full_frame
-            ) as capture:
+                engine, "_get_ok_window_backend", return_value=backend
+            ), patch.object(engine, "_maintain_background_hover") as hover:
                 frame, center, info = engine._diagnostic_capture_context(
                     config, capture_frame=True
                 )
-        capture.assert_called_once_with(None, config)
+        backend.capture_frame.assert_called_once_with(target)
+        hover.assert_not_called()
         self.assertEqual(frame.shape, (1030, 1918, 3))
         self.assertEqual(center, (1500, 800))
         self.assertEqual(info["expected_size"], [1918, 1030])

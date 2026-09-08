@@ -20,7 +20,6 @@ from . import window_target
 
 from .config import (
     APP_DIR,
-    DEBUG_IMAGE_PATH,
     AppConfig,
     effective_roi_size,
     load_config,
@@ -56,6 +55,7 @@ class EventKind(str, Enum):
     METRIC = "metric"
     CONFIG = "config"
     STATE = "state"
+    DIAGNOSTIC = "diagnostic"
 
 
 class IconState(str, Enum):
@@ -76,7 +76,11 @@ class StaminaMidpointState(str, Enum):
     DARK = "dark"
 
 
-class _CleanupCancelled(RuntimeError):
+class _OperationCancelled(RuntimeError):
+    """本轮工作已被暂停或被新一轮运行替代。"""
+
+
+class _CleanupCancelled(_OperationCancelled):
     """用户在背包整理途中暂停了监测。"""
 
 
@@ -122,6 +126,8 @@ class EngineEvent:
     waiting_for_bounce: bool = False
     catch_strategy: str = ""
     hook_elapsed_seconds: float = 0.0
+    diagnostic_path: Path | None = None
+    snapshot_state: str = ""
 
 
 EventCallback = Callable[[EngineEvent], None]
@@ -203,6 +209,10 @@ class FishingEngine:
         self._shutdown = threading.Event()
         self._thread: threading.Thread | None = None
         self._listener: keyboard.Listener | None = None
+        self._hotkeys_down: set[keyboard.Key] = set()
+        self._work_context = threading.local()
+        self._debug_capture_lock = threading.Lock()
+        self._debug_capture_thread: threading.Thread | None = None
         self._cleanup_test_requested = threading.Event()
         self._ignore_esc_until = 0.0
 
@@ -277,7 +287,9 @@ class FishingEngine:
             target=self._monitor_loop, name="fishing-monitor", daemon=True
         )
         self._thread.start()
-        self._listener = keyboard.Listener(on_press=self._on_key_press)
+        self._listener = keyboard.Listener(
+            on_press=self._on_key_press, on_release=self._on_key_release
+        )
         self._listener.start()
         self._emit(
             EventKind.INFO,
@@ -285,6 +297,7 @@ class FishingEngine:
         )
 
     def close(self) -> None:
+        self._interrupt_generation += 1
         self._enabled.clear()
         self._shutdown.set()
         if self._listener is not None:
@@ -344,6 +357,17 @@ class FishingEngine:
         self._emit(EventKind.SUCCESS, message)
         return x, y
     def set_monitoring(self, enabled: bool) -> bool:
+        if not enabled:
+            # 先撤销送键资格，再重置识别数据，避免旧帧趁重置期间继续动作。
+            self._interrupt_generation += 1
+            self._enabled.clear()
+            self._cleanup_test_requested.clear()
+            self._reset_detection()
+            self._emit(EventKind.STATE, "监测已暂停，不会发送按键。", monitoring=False)
+            return True
+        if self._enabled.is_set() or self._shutdown.is_set():
+            return self._enabled.is_set() and not self._shutdown.is_set()
+        generation = self._interrupt_generation
         config = self.config()
         if enabled:
             if config.capture_mode == "window":
@@ -366,6 +390,8 @@ class FishingEngine:
             self._last_diag_snapshot_at = None
             self._diag_snapshot_count = 0
             self._prepare_stamina_view(config)
+            if generation != self._interrupt_generation or self._shutdown.is_set():
+                return False
             if config.capture_mode == "window":
                 try:
                     target = self._resolve_target_window(config)
@@ -380,6 +406,8 @@ class FishingEngine:
                     f"后台虚拟悬停已锁定至窗口内 {config.target_button_offset}；真实鼠标可自由移动。",
                     monitoring=True,
                 )
+            if generation != self._interrupt_generation or self._shutdown.is_set():
+                return False
             self._enabled.set()
             self._schedule_recast(time.monotonic(), config, "监测启动")
             self._emit(EventKind.INFO, self._monitoring_details(config), monitoring=True)
@@ -392,12 +420,6 @@ class FishingEngine:
                 else "监测已启动，请把游戏保持在前台。"
             )
             self._emit(EventKind.STATE, message, monitoring=True)
-        else:
-            # 递增中断代数：让「停止→立刻重启」也能取消进行中的按键序列。
-            self._interrupt_generation += 1
-            self._cleanup_test_requested.clear()
-            self._enabled.clear()
-            self._emit(EventKind.STATE, "监测已暂停，不会发送按键。", monitoring=False)
         return True
     def toggle_monitoring(self) -> None:
         self.set_monitoring(not self._enabled.is_set())
@@ -444,32 +466,109 @@ class FishingEngine:
         )
         return True
 
-    def save_debug_capture(self) -> Path | None:
+    def request_debug_capture(self) -> bool:
+        """F9 与界面共用异步入口；同一时间只生成一份诊断。"""
+        if self._shutdown.is_set() or not self._debug_capture_lock.acquire(blocking=False):
+            return False
         config = self.config()
+        self._emit(EventKind.DIAGNOSTIC, "正在保存识别现场…", snapshot_state="saving")
+
+        def worker() -> None:
+            try:
+                self.save_debug_capture(config)
+            except Exception as error:
+                record_error("F9 diagnostic worker", error)
+                if not self._shutdown.is_set():
+                    self._emit(EventKind.DIAGNOSTIC, f"保存识别现场失败：{error}", snapshot_state="failed")
+            finally:
+                self._debug_capture_lock.release()
+
+        try:
+            self._debug_capture_thread = threading.Thread(
+                target=worker, name="f9-diagnostic", daemon=True
+            )
+            self._debug_capture_thread.start()
+        except Exception as error:
+            self._debug_capture_lock.release()
+            self._emit(EventKind.DIAGNOSTIC, f"无法启动诊断保存：{error}", snapshot_state="failed")
+            return False
+        return True
+
+    def save_debug_capture(self, config: AppConfig | None = None) -> Path | None:
+        """从同一张画面保存 ROI 和诊断包；不发送游戏按键或改变校准。"""
+        config = config or self.config()
         if config.capture_mode == "window":
             missing_calibration = config.target_button_offset is None
         else:
             missing_calibration = config.button_center is None
         if missing_calibration:
-            self._emit(EventKind.WARNING, "请先完成校准，才能保存识别区域。")
+            self._emit(
+                EventKind.DIAGNOSTIC, "请先按 F7 校准，再按 F9 保存识别现场。",
+                snapshot_state="failed",
+            )
             return None
+        diagnostic_path: Path | None = None
         try:
+            frame, center, capture_info = self._diagnostic_capture_context(config, capture_frame=True)
+            if frame is None or not frame.size or center is None:
+                raise RuntimeError("没有取得有效画面或校准坐标，请检查游戏窗口")
+            height, width = frame.shape[:2]
+            x, y = center
+            coordinate_width, coordinate_height = (
+                capture_info["expected_size"] if config.capture_mode == "window" else (width, height)
+            )
+            if not (0 <= x < coordinate_width and 0 <= y < coordinate_height):
+                raise RuntimeError("校准点不在当前画面内，请回到游戏重新按 F7 校准")
             if config.capture_mode == "window":
-                frame = self._capture_frame(None, config)
+                expected_width, expected_height = capture_info["expected_size"]
+                roi_width, roi_height = effective_roi_size(config, (expected_width, expected_height))
+                scale_x, scale_y = width / expected_width, height / expected_height
+                x, y = round(x * scale_x), round(y * scale_y)
+                center = (x, y)
+                roi_width, roi_height = max(1, round(roi_width * scale_x)), max(1, round(roi_height * scale_y))
+                if roi_width > width or roi_height > height:
+                    raise RuntimeError("窗口画面小于识别区域，请恢复游戏窗口尺寸")
+                left = min(max(0, x - roi_width // 2), width - roi_width)
+                top = min(max(0, y - roi_height // 2), height - roi_height)
             else:
-                with mss.MSS() as screen:
-                    frame = self._capture_frame(screen, config)
-            cv2.imwrite(str(DEBUG_IMAGE_PATH), frame[:, :, :3])
+                roi_width, roi_height = effective_roi_size(config)
+                left, top = x - roi_width // 2, y - roi_height // 2
+            roi = frame[max(0, top):min(height, top + roi_height),
+                        max(0, left):min(width, left + roi_width), :3].copy()
+            capture_info["roi_bounds"] = [max(0, left), max(0, top), roi.shape[1], roi.shape[0]]
+            capture_info["frame_button_center"] = list(center)
+            diagnostic_path = self.export_diagnostic_snapshot(
+                "F9 手动快照", frame=frame, config=config,
+                local_center=center, capture_info=capture_info, roi=roi, announce=False,
+            )
+            if diagnostic_path is None:
+                raise RuntimeError("诊断包生成失败，详情见本地错误日志")
+            image_path = diagnostic_path.with_name(f"{diagnostic_path.stem}-roi.png")
+            encoded_ok, encoded = cv2.imencode(".png", roi)
+            if not encoded_ok:
+                raise RuntimeError("截图编码失败")
+            # OpenCV 的 imwrite 在部分 Windows 中文路径下会失败而只返回 False。
+            image_path.write_bytes(encoded.tobytes())
         except Exception as error:  # pragma: no cover - 依赖实际显示器状态
-            self._emit(EventKind.ERROR, f"保存识别区域失败：{error}")
+            record_error("F9 diagnostic capture", error)
+            if self._shutdown.is_set():
+                return None
+            self._emit(
+                EventKind.DIAGNOSTIC,
+                (f"诊断包已保存，但单独截图保存失败：{error}；可在 ZIP 内查看 roi.png。"
+                 if diagnostic_path else f"保存识别现场失败：{error}"),
+                diagnostic_path=diagnostic_path,
+                snapshot_state="partial" if diagnostic_path else "failed",
+            )
             return None
+        if self._shutdown.is_set():
+            return image_path
         self._emit(
-            EventKind.SUCCESS,
-            "识别区域快照已保存，可用它确认圆形按钮是否完整包含。",
-            debug_image=DEBUG_IMAGE_PATH,
+            EventKind.DIAGNOSTIC,
+            f"识别现场已保存：截图 {image_path}；诊断包 {diagnostic_path}。仅保存在本机，不会自动上传。",
+            debug_image=image_path, diagnostic_path=diagnostic_path, snapshot_state="saved",
         )
-        self.export_diagnostic_snapshot("F9 手动快照", config=config)
-        return DEBUG_IMAGE_PATH
+        return image_path
 
     # 正常收鱼动画只会短暂漏判；持续 20 秒没有任何状态时保存现场。
     _UNRECOGNIZED_SNAPSHOT_AFTER_S = 20.0
@@ -500,11 +599,17 @@ class FishingEngine:
                 else None,
                 window_backend=config.window_backend,
             )
-            frame = (
-                self._capture_stamina_frame(None, config)[:, :, :3].copy()
-                if capture_frame
-                else None
-            )
+            frame = None
+            if capture_frame:
+                # 诊断只读画面，不调用钓鱼流程的虚拟悬停，以免干扰背包操作。
+                if config.window_backend == "ok":
+                    with self._backend_lock:
+                        if self._shutdown.is_set():
+                            raise RuntimeError("程序正在退出，已取消截图")
+                        frame = self._get_ok_window_backend(target).capture_frame(target)
+                else:
+                    frame = window_target.capture_window_frame(target.handle)
+                frame = frame[:, :, :3].copy()
             return frame, config.target_button_offset, capture_info
 
         with mss.MSS() as screen:
@@ -598,6 +703,11 @@ class FishingEngine:
         frame: np.ndarray | None = None,
         config: AppConfig | None = None,
         out_dir: Path | None = None,
+        *,
+        local_center: tuple[int, int] | None = None,
+        capture_info: dict[str, object] | None = None,
+        roi: np.ndarray | None = None,
+        announce: bool = True,
     ) -> Path | None:
         """保存环境、逐层识别结果和完整捕获帧；失败只写警示。"""
         try:
@@ -608,21 +718,22 @@ class FishingEngine:
                 )
             else:
                 frame = frame[:, :, :3].copy()
-                local_center = (
-                    config.target_button_offset
-                    if config.capture_mode == "window"
-                    else config.button_center
-                )
-                capture_info = {
-                    "capture_mode": config.capture_mode,
-                    "display_mode": config.display_mode,
-                    "selected_resolution": config.selected_resolution,
-                    "monitor_index": config.monitor_index,
-                    "expected_size": [int(frame.shape[1]), int(frame.shape[0])],
-                    "button_center": (
-                        list(local_center) if local_center is not None else None
-                    ),
-                }
+                if capture_info is None:
+                    local_center = (
+                        config.target_button_offset
+                        if config.capture_mode == "window"
+                        else config.button_center
+                    )
+                    capture_info = {
+                        "capture_mode": config.capture_mode,
+                        "display_mode": config.display_mode,
+                        "selected_resolution": config.selected_resolution,
+                        "monitor_index": config.monitor_index,
+                        "expected_size": [int(frame.shape[1]), int(frame.shape[0])],
+                        "button_center": (
+                            list(local_center) if local_center is not None else None
+                        ),
+                    }
             pipeline = vision_diagnostics.run_pipeline_check(frame, local_center)
             environment = vision_diagnostics.collect_environment(
                 frame_shape=tuple(frame.shape) if frame is not None else None,
@@ -638,6 +749,9 @@ class FishingEngine:
                 "v2_vision_enabled": config.v2_vision_enabled,
                 "monitor_index": config.monitor_index,
                 "window_backend": config.window_backend,
+                "roi_width": config.roi_width,
+                "roi_height": config.roi_height,
+                "auto_scale_roi": config.auto_scale_roi,
             }
             target = out_dir if out_dir is not None else VISION_DIAGNOSTICS_DIR
             path = vision_diagnostics.write_snapshot(
@@ -647,15 +761,18 @@ class FishingEngine:
                 environment=environment,
                 pipeline=pipeline,
                 config_summary=summary,
+                roi_bgr=roi,
             )
         except Exception as error:
             record_error("export recognition diagnostic", error, extra={"reason": reason})
-            self._emit(EventKind.WARNING, f"识别诊断生成失败：{error}")
+            if announce:
+                self._emit(EventKind.WARNING, f"识别诊断生成失败：{error}")
             return None
-        self._emit(
-            EventKind.SUCCESS,
-            f"识别诊断已保存（{reason}）：{path}。文件只保存在本机。",
-        )
+        if announce:
+            self._emit(
+                EventKind.SUCCESS,
+                f"识别诊断已保存（{reason}）：{path}。文件只保存在本机。",
+            )
         return path
     @staticmethod
     def _icon_circle_mask(height: int, width: int) -> np.ndarray:
@@ -1665,13 +1782,20 @@ class FishingEngine:
         # 回调里逃逸的异常会杀死 pynput 监听线程，之后所有快捷键
         # （包括 Esc 紧急停止）都会静默失效，因此必须整体防护。
         try:
+            if key in (keyboard.Key.f7, keyboard.Key.f8, keyboard.Key.f9):
+                if key in self._hotkeys_down:
+                    return None
+                self._hotkeys_down.add(key)
             if key == keyboard.Key.f7:
                 self.calibrate_from_cursor()
             elif key == keyboard.Key.f8:
                 self.toggle_monitoring()
             elif key == keyboard.Key.f9:
-                self.save_debug_capture()
+                self.request_debug_capture()
             elif key == keyboard.Key.esc:
+                # 暂停后 Esc 属于游戏操作，不再重复暂停或播报紧急停止。
+                if not self.is_monitoring():
+                    return None
                 if time.monotonic() < self._ignore_esc_until:
                     return None
                 self.set_monitoring(False)
@@ -1681,15 +1805,37 @@ class FishingEngine:
             self._emit(EventKind.WARNING, f"快捷键处理出现异常：{error}")
         return None
 
+    def _on_key_release(self, key: keyboard.Key | keyboard.KeyCode | None) -> None:
+        self._hotkeys_down.discard(key)
+
+    def _operation_active(self, generation: int) -> bool:
+        return (
+            self._enabled.is_set()
+            and not self._shutdown.is_set()
+            and generation == self._interrupt_generation
+        )
+
+    def _ensure_operation_active(self) -> None:
+        # 线程局部代数不会被另一个线程的停止/重启覆盖；覆盖到真正送键前。
+        generation = getattr(self._work_context, "generation", None)
+        if generation is not None and not self._operation_active(generation):
+            raise _OperationCancelled()
+
     def _monitor_loop(self) -> None:
         screen: mss.MSS | None = None
         consecutive_failures = 0
+        last_generation: int | None = None
         try:
             while not self._shutdown.is_set():
                 if not self._enabled.wait(timeout=0.15):
                     consecutive_failures = 0
                     continue
 
+                generation = self._interrupt_generation
+                self._work_context.generation = generation
+                if generation != last_generation:
+                    consecutive_failures = 0
+                    last_generation = generation
                 config = self.config()
                 if config.capture_mode == "window":
                     missing_calibration = config.target_button_offset is None
@@ -1704,6 +1850,7 @@ class FishingEngine:
                     else "屏幕识别"
                 )
                 try:
+                    self._ensure_operation_active()
                     if self._cleanup_test_requested.is_set():
                         self._cleanup_test_requested.clear()
                         self._perform_inventory_cleanup(
@@ -1716,7 +1863,9 @@ class FishingEngine:
                     if config.capture_mode == "screen" and screen is None:
                         screen = mss.MSS()
                     frame = self._capture_frame(screen, config)
+                    self._ensure_operation_active()
                     icon_state, signals = self.classify_frame_state(frame[:, :, :3], config)
+                    self._ensure_operation_active()
                     loop_now = time.monotonic()
                     if config.v2_shadow_enabled:
                         self._shadow_observe(
@@ -1764,6 +1913,7 @@ class FishingEngine:
                                 rod_required_confidence,
                                 inventory_full_confidence,
                             ) = blocking_confidences
+                    self._ensure_operation_active()
                     self._process_frame(
                         signals.red_pixels,
                         config,
@@ -1775,14 +1925,21 @@ class FishingEngine:
                         signals.recognition_source,
                         signals.recognition_confidence,
                     )
-                    if consecutive_failures:
+                    if consecutive_failures and self._operation_active(generation):
                         self._emit(
                             EventKind.SUCCESS,
                             f"{source}已恢复，连续失败计数已清零。",
                             monitoring=True,
                         )
                     consecutive_failures = 0
+                except _OperationCancelled:
+                    consecutive_failures = 0
+                    continue
                 except Exception as error:  # pragma: no cover - 显示器环境差异
+                    # 暂停/重启期间返回的截图异常不再播报，也不能停止新一轮运行。
+                    if not self._operation_active(generation):
+                        consecutive_failures = 0
+                        continue
                     retry_limit = max(
                         0, min(20, config.runtime_error_retry_count)
                     )
@@ -1829,10 +1986,12 @@ class FishingEngine:
             self._enabled.clear()
             self._emit(EventKind.ERROR, f"无法启动识别服务：{error}")
         finally:
+            self._work_context.generation = None
             if screen is not None:
                 screen.close()
 
     def _capture_frame(self, screen: mss.MSS | None, config: AppConfig) -> np.ndarray:
+        self._ensure_operation_active()
         if config.capture_mode == "window":
             if config.target_button_offset is None:
                 raise RuntimeError("目标窗口尚未完成按钮校准。")
@@ -1915,7 +2074,11 @@ class FishingEngine:
         self._last_stamina_scan_at = now
         try:
             frame = self._capture_stamina_frame(screen, config)
+            self._ensure_operation_active()
+        except _OperationCancelled:
+            raise
         except Exception as error:  # pragma: no cover - 由实际窗口捕捉环境决定
+            self._ensure_operation_active()
             if now - self._last_stamina_warning_at >= 3.0:
                 self._emit(EventKind.WARNING, f"无法读取活鱼体力条：{error}")
                 self._last_stamina_warning_at = now
@@ -1980,7 +2143,11 @@ class FishingEngine:
         self._last_escape_scan_at = now
         try:
             frame = self._capture_stamina_frame(screen, config)
+            self._ensure_operation_active()
+        except _OperationCancelled:
+            raise
         except Exception as error:  # pragma: no cover - 由实际窗口捕捉环境决定
+            self._ensure_operation_active()
             if now - self._last_stamina_warning_at >= 3.0:
                 self._emit(EventKind.WARNING, f"无法扫描跑鱼提示：{error}")
                 self._last_stamina_warning_at = now
@@ -2005,7 +2172,11 @@ class FishingEngine:
         self._last_blocking_message_scan_at = now
         try:
             frame = self._capture_stamina_frame(screen, config)
+            self._ensure_operation_active()
+        except _OperationCancelled:
+            raise
         except Exception as error:  # pragma: no cover - 由实际窗口捕捉环境决定
+            self._ensure_operation_active()
             if now - self._last_blocking_message_warning_at >= 3.0:
                 self._emit(EventKind.WARNING, f"无法扫描钓鱼阻塞提示：{error}")
                 self._last_blocking_message_warning_at = now
@@ -2085,6 +2256,7 @@ class FishingEngine:
         recognition_source: str | None = None,
         recognition_confidence: float = 0.0,
     ) -> None:
+        self._ensure_operation_active()
         if recognition_source is None:
             recognition_source = (
                 "compat_pixel"
@@ -2322,6 +2494,7 @@ class FishingEngine:
                 self._schedule_recast(time.monotonic(), config, "移动恢复完成")
 
         self._perform_pending_recast(now, icon_state, config)
+        self._ensure_operation_active()
 
         if now - self._last_metric_at >= 0.18:
             self._emit(
@@ -2916,13 +3089,19 @@ class FishingEngine:
         screen: mss.MSS | None = None
         self._inventory_full_hits = 0
         try:
+            self._ensure_cleanup_active(generation)
             if config.capture_mode == "screen":
                 screen = mss.MSS()
             self._emit(
                 EventKind.STATE,
-                "自动清理背包：已确认背包满，正在打开背包。",
+                (
+                    "自动清理背包：已确认背包满，正在打开背包。"
+                    if resume_fishing
+                    else "背包清理调试：正在打开背包，执行一次真实整理测试。"
+                ),
                 monitoring=True,
             )
+            self._ensure_cleanup_active(generation)
             self._press_key("i", config)
             _frame, tidy_match = self._wait_cleanup_screen(
                 screen,
@@ -2936,6 +3115,7 @@ class FishingEngine:
                 f"背包页面已确认：整理按钮相似度 {tidy_match.confidence:.3f}。",
                 monitoring=True,
             )
+            self._ensure_cleanup_active(generation)
             self._click_game_point(tidy_match.center, config, screen)
 
             _frame, initial_simple = self._wait_cleanup_screen(
@@ -2953,6 +3133,7 @@ class FishingEngine:
             if initial_simple.bold_cleanup == BoldCleanupState.UNKNOWN:
                 raise RuntimeError("无法判断“大胆整理”开关状态")
             if initial_simple.bold_cleanup == BoldCleanupState.ON:
+                self._ensure_cleanup_active(generation)
                 self._click_game_point(
                     initial_simple.toggle_center, config, screen
                 )
@@ -2973,6 +3154,7 @@ class FishingEngine:
             category_names = ("装备", "材料", "黄金及杂物", "恢复道具")
             current_simple = safe_simple
             for category_index, category_name in enumerate(category_names):
+                self._ensure_cleanup_active(generation)
                 if not current_simple.selected_categories[category_index]:
                     self._click_game_point(
                         current_simple.category_centers[category_index],
@@ -2986,6 +3168,7 @@ class FishingEngine:
                     refreshed = InventoryCleanupVision.inspect_simple_screen(
                         frame
                     )
+                    self._ensure_cleanup_active(generation)
                     if refreshed is None:
                         raise RuntimeError(
                             f"选择“{category_name}”后未识别到简单整理页面"
@@ -3017,9 +3200,8 @@ class FishingEngine:
                 f"{selected_count} 个有可整理项目的分类呈绿色，整理按钮可用。",
                 monitoring=True,
             )
-            self._click_game_point(
-                final_simple.execute_center, config, screen
-            )
+            self._ensure_cleanup_active(generation)
+            self._click_game_point(final_simple.execute_center, config, screen)
 
             detail_frame, detail_match = self._wait_cleanup_screen(
                 screen,
@@ -3033,6 +3215,7 @@ class FishingEngine:
                 "自动清理背包：整理对象页面已确认，正在执行四类简单整理。",
                 monitoring=True,
             )
+            self._ensure_cleanup_active(generation)
             self._click_game_point(
                 self._bottom_center_button(detail_frame),
                 config,
@@ -3052,6 +3235,7 @@ class FishingEngine:
                 f"对象页 {detail_match.confidence:.3f}，完成页 {result_match.confidence:.3f}。",
                 monitoring=True,
             )
+            self._ensure_cleanup_active(generation)
             self._click_game_point(
                 self._bottom_center_button(result_frame),
                 config,
@@ -3064,9 +3248,12 @@ class FishingEngine:
                 InventoryCleanupVision.find_done_toast,
                 "“已整理背包”提示",
             )
+            self._ensure_cleanup_active(generation)
             self._press_key("esc", config)
             time.sleep(0.25)
+            self._ensure_cleanup_active(generation)
             self._restore_fishing_pointer(config)
+            self._ensure_cleanup_active(generation)
             self._reset_detection()
             if resume_fishing:
                 self._startup_probe_active = True
@@ -3093,9 +3280,11 @@ class FishingEngine:
                     monitoring=False,
                 )
             return True
-        except _CleanupCancelled:
+        except _OperationCancelled:
             return True
         except Exception as error:
+            if not self._operation_active(generation):
+                return True
             self._interrupt_generation += 1
             self._enabled.clear()
             self._reset_detection()
@@ -3124,6 +3313,7 @@ class FishingEngine:
             self._ensure_cleanup_active(generation)
             frame = self._capture_stamina_frame(screen, config)[:, :, :3]
             result = detector(frame)
+            self._ensure_cleanup_active(generation)
             if result is not None:
                 return frame, result
             time.sleep(self.CLEANUP_CONFIRM_INTERVAL_SECONDS)
@@ -3143,6 +3333,7 @@ class FishingEngine:
             self._ensure_cleanup_active(generation)
             frame = self._capture_stamina_frame(screen, config)[:, :, :3]
             state = InventoryCleanupVision.inspect_simple_screen(frame)
+            self._ensure_cleanup_active(generation)
             if state is None:
                 raise RuntimeError(f"{reason}第 {frame_number} 帧未识别到简单整理页面")
             if state.bold_cleanup != BoldCleanupState.OFF:
@@ -3183,12 +3374,16 @@ class FishingEngine:
         config: AppConfig,
         screen: mss.MSS | None,
     ) -> None:
+        self._ensure_operation_active()
         if config.capture_mode == "window":
             target = self._resolve_target_window(config)
             if config.window_backend == "ok":
                 with self._backend_lock:
-                    self._get_ok_window_backend(target).click(target, point)
+                    backend = self._get_ok_window_backend(target)
+                    self._ensure_operation_active()
+                    backend.click(target, point)
             else:
+                self._ensure_operation_active()
                 window_target.post_mouse_click(target.handle, point)
             return
         if screen is None:
@@ -3197,12 +3392,14 @@ class FishingEngine:
             max(1, int(config.monitor_index)), len(screen.monitors) - 1
         )
         monitor = screen.monitors[monitor_index]
+        self._ensure_operation_active()
         pyautogui.click(
             int(monitor["left"]) + int(point[0]),
             int(monitor["top"]) + int(point[1]),
         )
 
     def _restore_fishing_pointer(self, config: AppConfig) -> None:
+        self._ensure_operation_active()
         if config.capture_mode == "window":
             target = self._resolve_target_window(config)
             self._maintain_background_hover(target, config, force=True)
@@ -3295,6 +3492,7 @@ class FishingEngine:
         self, config: AppConfig, *, startup: bool = False
     ) -> None:
         """识别到指南针时按所选方式移动，刷新开始钓鱼图标。"""
+        self._ensure_operation_active()
         self._last_recovery_at = time.monotonic()
         self._idle_frames = 0
         was_enabled = self._enabled.is_set()
@@ -3408,6 +3606,7 @@ class FishingEngine:
         force: bool = False,
     ) -> None:
         """让目标窗口持续认为鼠标停在校准点，不改变系统真实光标。"""
+        self._ensure_operation_active()
         offset = config.target_button_offset
         if offset is None:
             return
@@ -3465,13 +3664,17 @@ class FishingEngine:
         )
 
     def _press_key(self, key: str, config: AppConfig) -> None:
+        self._ensure_operation_active()
         if config.capture_mode == "window":
             target = self._resolve_target_window(config)
             self._maintain_background_hover(target, config, force=True)
             if config.window_backend == "ok":
                 with self._backend_lock:
-                    self._get_ok_window_backend(target).tap_key(key)
+                    backend = self._get_ok_window_backend(target)
+                    self._ensure_operation_active()
+                    backend.tap_key(key)
             else:
+                self._ensure_operation_active()
                 window_target.post_key_tap(target.handle, key, activate_message=True)
             return
         if key.lower() == "esc":
@@ -3481,13 +3684,17 @@ class FishingEngine:
         pyautogui.press(key)
 
     def _tap_key(self, key: str, hold_ms: int, config: AppConfig) -> None:
+        self._ensure_operation_active()
         if config.capture_mode == "window":
             target = self._resolve_target_window(config)
             self._maintain_background_hover(target, config, force=True)
             if config.window_backend == "ok":
                 with self._backend_lock:
-                    self._get_ok_window_backend(target).tap_key(key, hold_ms)
+                    backend = self._get_ok_window_backend(target)
+                    self._ensure_operation_active()
+                    backend.tap_key(key, hold_ms)
             else:
+                self._ensure_operation_active()
                 window_target.post_key_tap(
                     target.handle, key, hold_ms, activate_message=True
                 )
@@ -3541,6 +3748,7 @@ class FishingEngine:
         message: str,
         **details: object,
     ) -> None:
+        details.setdefault("monitoring", self._enabled.is_set())
         if kind == EventKind.ERROR:
             record_error("fishing engine", message)
         if self._event_callback is not None:

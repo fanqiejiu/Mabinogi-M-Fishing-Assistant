@@ -139,8 +139,12 @@ class FishingEngineTests(unittest.TestCase):
         frame = np.zeros((186, 160, 3), dtype=np.uint8)
         signals = IconColorSignals(0, 0.0, 0.0, 0.0, 0.0, 0.0)
 
-        def finish_after_success(*_args, **_kwargs) -> None:
-            engine._shutdown.set()  # type: ignore[attr-defined]
+        def finish_after_success(event) -> None:
+            events.append(event)
+            if event.kind == EventKind.SUCCESS and "已恢复" in event.message:
+                engine._shutdown.set()  # type: ignore[attr-defined]
+
+        engine.set_event_callback(finish_after_success)
 
         with patch.object(
             engine,
@@ -153,7 +157,7 @@ class FishingEngineTests(unittest.TestCase):
             "classify_frame_state",
             return_value=(IconState.NORMAL, signals),
         ), patch.object(
-            engine, "_process_frame", side_effect=finish_after_success
+            engine, "_process_frame"
         ), patch(
             "fishing_assistant.engine.time.sleep"
         ):

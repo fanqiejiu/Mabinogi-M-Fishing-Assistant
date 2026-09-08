@@ -10,6 +10,16 @@ from fishing_assistant.updates import check_github_release
 
 
 class UpdateCheckTests(unittest.TestCase):
+    def test_non_object_release_response_returns_failure(self) -> None:
+        for payload in ([], None, "unexpected"):
+            with self.subTest(payload=payload):
+                response = MagicMock()
+                response.__enter__.return_value.read.return_value = json.dumps(payload).encode()
+                with patch("fishing_assistant.updates.urlopen", return_value=response):
+                    result = check_github_release("owner/repository", "0.6.3.1")
+                self.assertFalse(result.ok)
+                self.assertIn("格式异常", result.message)
+
     def test_new_release_includes_body_for_popup(self) -> None:
         response = MagicMock()
         response.__enter__.return_value.read.return_value = json.dumps(

@@ -87,6 +87,8 @@ def cue_for_engine_event(kind: object, message: str, monitoring: bool) -> str | 
         and message.startswith("监测已暂停")
     ):
         return F8_STOP_CUE
+    if kind_text == "error" and monitoring:
+        return RECOGNITION_FAILED_CUE
     if kind_text == "error" or (
         kind_text == "warning" and "紧急停止" in message
     ):
@@ -197,6 +199,12 @@ class VoiceAlertPlayer:
                 self._pending.append((cue, selected))
             self._condition.notify()
             return selected
+
+    def clear_pending(self) -> None:
+        """手动暂停时丢弃尚未播放的提醒；正在播放的这一句正常结束。"""
+        with self._condition:
+            self._pending.clear()
+            self._condition.notify_all()
 
     def close(self) -> None:
         with self._condition:

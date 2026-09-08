@@ -63,6 +63,8 @@ def check_github_release(repository: str, current_version: str) -> UpdateResult:
     except (json.JSONDecodeError, UnicodeDecodeError) as error:
         return UpdateResult(False, f"无法解析 GitHub 更新信息：{error}")
 
+    if not isinstance(payload, dict):
+        return UpdateResult(False, "GitHub 更新信息格式异常，请稍后重试。")
     tag = str(payload.get("tag_name") or "").strip()
     release_url = str(payload.get("html_url") or "").strip() or None
     release_notes = str(payload.get("body") or "").strip()
