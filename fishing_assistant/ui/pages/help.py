@@ -1,5 +1,11 @@
 """使用说明标签页。"""
-from PySide6.QtWidgets import *
+from PySide6.QtWidgets import (
+    QGridLayout,
+    QLabel,
+    QScrollArea,
+    QSizePolicy,
+    QVBoxLayout,
+)
 
 from .base import BasePageMixin
 from ..widget.card import Card

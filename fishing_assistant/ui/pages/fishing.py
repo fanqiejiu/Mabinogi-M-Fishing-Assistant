@@ -1,5 +1,14 @@
 """钓鱼设置标签页。"""
-from PySide6.QtWidgets import *
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QFrame,
+    QGridLayout,
+    QLabel,
+    QScrollArea,
+    QStackedWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
 from .base import BasePageMixin
 from ..widget.card import Card
