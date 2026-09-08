@@ -59,7 +59,7 @@ cd Mabinogi-M-Fishing-Assistant
 .\run.bat
 ```
 
-系统要求：Windows 10/11、Python 3.10–3.13（仅源码运行或自行打包需要）。
+系统要求：Windows 10/11、Python >= 3.12（仅源码运行或自行打包需要）。
 
 ## 快速开始
 
