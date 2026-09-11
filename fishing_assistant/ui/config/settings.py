@@ -52,9 +52,18 @@ class SettingsConfigurationMixin:
             )
 
     def _floating_status_toggled(self, checked: bool) -> None:
+        if hasattr(self, "floating_status_check") and (
+            self.floating_status_check.isChecked() != checked
+        ):
+            self.floating_status_check.setChecked(checked)
         self.engine.update_config(floating_status_enabled=checked)
         self._sync_floating_status_controls()
         self._sync_floating_status_visibility()
+
+    def _toggle_floating_status(self) -> None:
+        self._floating_status_toggled(
+            not self.engine.config().floating_status_enabled
+        )
 
     def _floating_opacity_changed(self, value: int) -> None:
         self.engine.update_config(floating_status_opacity=value)
@@ -66,6 +75,16 @@ class SettingsConfigurationMixin:
         self.floating_opacity_panel.setEnabled(enabled)
         self.floating_opacity_value.setText(f"{opacity}%")
         self.floating_status_bar.set_background_opacity(opacity)
+        if hasattr(self, "floating_status_button"):
+            self.floating_status_button.setChecked(enabled)
+            self.floating_status_button.setText(
+                "悬浮栏 · 开" if enabled else "悬浮栏 · 关"
+            )
+            self.floating_status_button.setToolTip(
+                "关闭最小化时的悬浮状态栏"
+                if enabled
+                else "开启最小化时的悬浮状态栏"
+            )
 
     def _sync_floating_calibration_state(self) -> None:
         config = self.engine.config()

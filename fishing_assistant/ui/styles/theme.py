@@ -100,6 +100,17 @@ QScrollBar::handle:vertical:hover { background: #567394; }
 QScrollBar::handle:vertical:pressed { background: #6B8BAD; }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
 QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
+QPushButton#floatingStatusButton:checked {
+    background: #123629;
+    border-color: #2DB88B;
+    color: #80E7BF;
+}
+
+QPushButton#floatingStatusButton:unchecked {
+    background: #17263A;
+    border-color: #30455F;
+    color: #8EA2BD;
+}
 """
 
 DAY_STYLE = NIGHT_STYLE + """
@@ -155,6 +166,17 @@ QProgressBar::chunk { background: #20A977; }
 QCheckBox { color: #29415D; }
 QLabel#formLabel { color: #263B55; }
 QLabel#helpStep { color: #3D5774; }
+QPushButton#floatingStatusButton:checked {
+    background: #E0F7EE;
+    border-color: #8DDBC0;
+    color: #187352;
+}
+
+QPushButton#floatingStatusButton:unchecked {
+    background: #F5F8FC;
+    border-color: #C9D8E8;
+    color: #60758E;
+}
 """
 
 FLOATING_NIGHT_STYLE = """

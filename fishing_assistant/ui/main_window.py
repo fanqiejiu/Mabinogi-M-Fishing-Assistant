@@ -243,6 +243,11 @@ class MainWindow(
         self.runtime_state_chip.setProperty("state", "idle")
         self.runtime_state_chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.runtime_state_chip, 0, Qt.AlignmentFlag.AlignTop)
+        self.floating_status_button = QPushButton("悬浮栏")
+        self.floating_status_button.setObjectName("floatingStatusButton")
+        self.floating_status_button.setCheckable(True)
+        self.floating_status_button.setToolTip("切换最小化时是否显示悬浮状态栏")
+        layout.addWidget(self.floating_status_button, 0, Qt.AlignmentFlag.AlignTop)
         self.theme_button = QPushButton()
         self.theme_button.setToolTip("切换日间 / 夜间界面")
         layout.addWidget(self.theme_button, 0, Qt.AlignmentFlag.AlignTop)
@@ -252,6 +257,7 @@ class MainWindow(
         self.status_chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
         for control in (
             self.runtime_state_chip,
+            self.floating_status_button,
             self.theme_button,
             self.status_chip,
         ):

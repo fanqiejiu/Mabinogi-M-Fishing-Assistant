@@ -178,6 +178,9 @@ class FishingEngine:
     STAMINA_MIDPOINT_DARK_RATIO = 0.55
     STAMINA_MIDPOINT_DARK_CONFIRM_FRAMES = 2
     STAMINA_MIDPOINT_GREEN_CONFIRM_FRAMES = 2
+    # 回弹开始时填充宽度先于中点颜色恢复；用累计增长和连续增长帧抗抖动。
+    STAMINA_REBOUND_MIN_GROWTH_PX = 6
+    STAMINA_REBOUND_GROWTH_CONFIRM_FRAMES = 2
     STARTUP_IDLE_CONFIRM_FRAMES = 2
     ROD_REQUIRED_MATCH_THRESHOLD = 0.72
     INVENTORY_FULL_MATCH_THRESHOLD = 0.70
@@ -257,6 +260,8 @@ class FishingEngine:
         self._stamina_midpoint_state = StaminaMidpointState.UNKNOWN
         self._stamina_midpoint_dark_frames = 0
         self._stamina_midpoint_green_frames = 0
+        self._stamina_low_width = 0
+        self._stamina_rebound_growth_frames = 0
 
         self._escape_watch_until = 0.0
         self._escape_candidate_elapsed = 0.0
@@ -2663,8 +2668,8 @@ class FishingEngine:
             )
         self._emit(
             EventKind.INFO,
-            "检测到上钩，正在追踪绿色体力条；中点连续变灰后只记录，"
-            "必须再次连续恢复绿色才收鱼。" + learned_hint,
+            "检测到上钩，正在追踪绿色体力条；中点连续变灰后，"
+            "确认填充开始连续回升即可收鱼。" + learned_hint,
             monitoring=True,
         )
         if stamina_sample is None:
@@ -2839,6 +2844,7 @@ class FishingEngine:
                 self._stamina_probe_offset_x, width // 2
             )
 
+        previous_width = self._stamina_last_width
         previous_peak = self._stamina_peak_width
         if previous_peak == 0:
             self._stamina_peak_width = width
@@ -2865,13 +2871,12 @@ class FishingEngine:
                 monitoring=True,
             )
 
-        if state == StaminaMidpointState.UNKNOWN:
-            self._stamina_midpoint_dark_frames = 0
-            self._stamina_midpoint_green_frames = 0
-            self._stamina_rebound_started = False
-            return False
-
         if not self._stamina_low_seen:
+            if state == StaminaMidpointState.UNKNOWN:
+                self._stamina_midpoint_dark_frames = 0
+                self._stamina_midpoint_green_frames = 0
+                self._stamina_rebound_started = False
+                return False
             self._stamina_midpoint_green_frames = 0
             if state == StaminaMidpointState.DARK:
                 self._stamina_midpoint_dark_frames += 1
@@ -2882,12 +2887,40 @@ class FishingEngine:
                 >= self.STAMINA_MIDPOINT_DARK_CONFIRM_FRAMES
             ):
                 self._stamina_low_seen = True
+                self._stamina_low_width = width
+                self._stamina_rebound_growth_frames = 0
                 self._emit(
                     EventKind.INFO,
                     "体力条中点已连续变灰：确认第一次跌破半条；"
-                    "本次不收杆，开始等待中点恢复绿色。",
+                    "开始观察填充宽度回升。",
                     monitoring=True,
                 )
+            return False
+
+        if self._stamina_low_width > 0:
+            growth = width - self._stamina_low_width
+            if (
+                growth >= self.STAMINA_REBOUND_MIN_GROWTH_PX
+                and width >= previous_width
+            ):
+                self._stamina_rebound_growth_frames += 1
+            else:
+                self._stamina_rebound_growth_frames = 0
+            if (
+                self._stamina_rebound_growth_frames
+                >= self.STAMINA_REBOUND_GROWTH_CONFIRM_FRAMES
+            ):
+                self._emit(
+                    EventKind.INFO,
+                    "体力条填充宽度已连续增长：确认反弹开始，达到收鱼条件。",
+                    monitoring=True,
+                )
+                return True
+
+        if state == StaminaMidpointState.UNKNOWN:
+            self._stamina_midpoint_dark_frames = 0
+            self._stamina_midpoint_green_frames = 0
+            self._stamina_rebound_started = False
             return False
 
         if state == StaminaMidpointState.GREEN:
@@ -2968,6 +3001,8 @@ class FishingEngine:
         self._stamina_midpoint_state = StaminaMidpointState.UNKNOWN
         self._stamina_midpoint_dark_frames = 0
         self._stamina_midpoint_green_frames = 0
+        self._stamina_low_width = 0
+        self._stamina_rebound_growth_frames = 0
         self._last_stamina_scan_at = 0.0
 
     def _handle_horse_icon(

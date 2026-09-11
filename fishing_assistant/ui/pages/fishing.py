@@ -136,7 +136,7 @@ class FishingPageMixin(BasePageMixin):
         catch_grid.addWidget(
             self._form_label(
                 "收鱼模式",
-                "模式 1 会定位体力槽中点，连续确认灰色后等待它恢复绿色。",
+                "模式 1 会定位体力槽中点，确认下探后追踪填充宽度回升。",
             ),
             0,
             0,

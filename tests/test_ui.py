@@ -201,6 +201,19 @@ class UiRegressionTests(unittest.TestCase):
         owner._sync_floating_status_controls.assert_called_once_with()
         owner._sync_floating_status_visibility.assert_called_once_with()
 
+    def test_floating_status_topbar_button_toggles_independently(self) -> None:
+        owner = SimpleNamespace(
+            engine=MagicMock(),
+            _floating_status_toggled=MagicMock(),
+        )
+        owner.engine.config.return_value = SimpleNamespace(
+            floating_status_enabled=True
+        )
+
+        MainWindow._toggle_floating_status(owner)  # type: ignore[arg-type]
+
+        owner._floating_status_toggled.assert_called_once_with(False)
+
     def test_floating_background_opacity_is_saved_and_previewed(self) -> None:
         owner = SimpleNamespace(
             engine=MagicMock(),

@@ -152,6 +152,7 @@ class ConfigurationBindingMixin:
         self.view_snapshot_button.clicked.connect(self._view_snapshot)
         self.open_snapshot_folder_button.clicked.connect(self._open_snapshot_directory)
         self.theme_button.clicked.connect(self._toggle_theme)
+        self.floating_status_button.clicked.connect(self._toggle_floating_status)
         self.recognition_backend_combo.currentIndexChanged.connect(
             self._recognition_backend_changed
         )
