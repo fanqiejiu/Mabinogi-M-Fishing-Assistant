@@ -655,6 +655,35 @@ class FishingEngineTests(unittest.TestCase):
             engine._process_frame(1985, config, IconState.FISH_HOOKED, stamina_sample=rebound)
         press.assert_called_once_with("space")
 
+    def test_stamina_rebound_collects_when_fill_starts_growing(self) -> None:
+        config = AppConfig(
+            capture_mode="screen",
+            catch_strategy="stamina_bounce",
+            trigger_consecutive_frames=1,
+            press_cooldown_ms=0,
+        )
+        engine = FishingEngine()
+        dark = StaminaBarSample(
+            64, (400, 300), midpoint_state=StaminaMidpointState.DARK
+        )
+        growing = StaminaBarSample(
+            72, (400, 300), midpoint_state=StaminaMidpointState.UNKNOWN
+        )
+        growing_again = StaminaBarSample(
+            80, (400, 300), midpoint_state=StaminaMidpointState.UNKNOWN
+        )
+        with patch("fishing_assistant.engine.pyautogui.press") as press:
+            engine._process_frame(1985, config, IconState.FISH_HOOKED, dark)
+            engine._process_frame(1985, config, IconState.FISH_HOOKED, dark)
+            engine._process_frame(
+                1985, config, IconState.FISH_HOOKED, growing
+            )
+            press.assert_not_called()
+            engine._process_frame(
+                1985, config, IconState.FISH_HOOKED, growing_again
+            )
+        press.assert_called_once_with("space")
+
     def test_midpoint_tracking_can_start_after_bar_is_already_dark(self) -> None:
         config = AppConfig(
             capture_mode="screen",
