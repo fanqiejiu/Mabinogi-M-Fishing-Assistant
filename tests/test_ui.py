@@ -207,6 +207,64 @@ class UiRegressionTests(unittest.TestCase):
         owner._sync_floating_status_controls.assert_called_once_with()
         owner._sync_floating_status_visibility.assert_called_once_with()
 
+    def test_topbar_floating_status_button_syncs_with_settings(self) -> None:
+        config = AppConfig(floating_status_enabled=True, voice_alerts_enabled=False)
+        engine = MagicMock()
+        engine.config.return_value = config
+        engine.is_monitoring.return_value = False
+        engine.is_crafting.return_value = False
+
+        with patch(
+            "fishing_assistant.window_target.list_target_windows",
+            return_value=[],
+        ):
+            window = MainWindow(engine)
+        try:
+            self.assertTrue(window.floating_status_button.isChecked())
+            self.assertEqual(window.floating_status_button.text(), "悬浮栏 · 开")
+            window.floating_status_button.click()
+            self.assertFalse(window.floating_status_button.isChecked())
+            self.assertFalse(window.floating_status_check.isChecked())
+            engine.update_config.assert_called_with(floating_status_enabled=False)
+        finally:
+            window.crafting_page.timer.stop()
+            window.close()
+            window.deleteLater()
+            self.app.processEvents()
+
+    def test_topbar_floating_status_button_has_theme_aware_switch_states(self) -> None:
+        engine = MagicMock()
+        engine.config.return_value = AppConfig(voice_alerts_enabled=False)
+        engine.is_monitoring.return_value = False
+        engine.is_crafting.return_value = False
+
+        with patch(
+            "fishing_assistant.window_target.list_target_windows",
+            return_value=[],
+        ):
+            window = MainWindow(engine)
+        try:
+            for theme, on_color, off_color in (
+                ("night", "#123629", "#1b293c"),
+                ("day", "#e0f7ee", "#edf2f7"),
+            ):
+                window._apply_theme(theme)
+                style = window.styleSheet().lower()
+                self.assertIn(
+                    "qpushbutton#floatingstatusbutton:checked", style
+                )
+                self.assertIn(on_color, style)
+                self.assertIn(off_color, style)
+                window.floating_status_button.setChecked(True)
+                self.assertTrue(window.floating_status_button.isChecked())
+                window.floating_status_button.setChecked(False)
+                self.assertFalse(window.floating_status_button.isChecked())
+        finally:
+            window.crafting_page.timer.stop()
+            window.close()
+            window.deleteLater()
+            self.app.processEvents()
+
     def test_floating_background_opacity_is_saved_and_previewed(self) -> None:
         owner = SimpleNamespace(
             engine=MagicMock(),

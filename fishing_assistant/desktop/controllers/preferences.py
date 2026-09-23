@@ -1,6 +1,7 @@
 """语音、悬浮栏和主题偏好的交互"""
 from __future__ import annotations
 
+from PySide6.QtCore import QSignalBlocker
 from PySide6.QtGui import QIcon
 from fishing_assistant.constants import resource_path
 from fishing_assistant.desktop.styles import DAY_STYLE, NIGHT_STYLE
@@ -65,6 +66,18 @@ class PreferencesControllerMixin:
 
     def _sync_floating_status_controls(self) -> None:
         enabled = self.floating_status_check.isChecked()
+        if hasattr(self, "floating_status_button"):
+            blocker = QSignalBlocker(self.floating_status_button)
+            self.floating_status_button.setChecked(enabled)
+            del blocker
+            self.floating_status_button.setText(
+                "悬浮栏 · 开" if enabled else "悬浮栏 · 关"
+            )
+            self.floating_status_button.setToolTip(
+                "关闭最小化后的悬浮状态栏。"
+                if enabled
+                else "开启最小化后的悬浮状态栏。"
+            )
         opacity = self.floating_opacity_slider.value()
         self.floating_opacity_panel.setEnabled(enabled)
         self.floating_opacity_value.setText(f"{opacity}%")

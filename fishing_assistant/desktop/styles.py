@@ -71,6 +71,18 @@ QLabel#runtimeStateChip {
 }
 QLabel#runtimeStateChip[state="running"] { background: #102A31; border-color: #2DB88B; color: #75E4BE; }
 QLabel#runtimeStateChip[state="warning"] { background: #3A2C14; border-color: #82631F; color: #F6CF6A; }
+QPushButton#floatingStatusButton {
+    background: #1B293C; border: 1px solid #2B3D56; border-radius: 10px;
+    color: #AABCD2; padding: 8px 12px; font-weight: 700;
+}
+QPushButton#floatingStatusButton:hover { background: #21354E; border-color: #45627F; }
+QPushButton#floatingStatusButton:checked {
+    background: #123629; border-color: #1F7556; color: #80E7BF;
+}
+QPushButton#floatingStatusButton:checked:hover {
+    background: #174634; border-color: #2DB88B;
+}
+QPushButton#floatingStatusButton:pressed { background: #132033; }
 QFrame#timingCallout { background: #0A1626; border: 1px solid #29415E; border-radius: 9px; }
 QLabel#timingTitle { color: #75E4BE; font-weight: 800; }
 QLabel#updateDialogTitle { color: #F8FBFF; font-weight: 800; }
@@ -179,6 +191,17 @@ QLabel#statusChip[state="warning"] { background: #FFF5D8; border-color: #EDD38B;
 QLabel#runtimeStateChip { background: #F4F8FC; border-color: #C9D8E8; color: #536B85; }
 QLabel#runtimeStateChip[state="running"] { background: #E0F7EE; border-color: #8DDBC0; color: #187352; }
 QLabel#runtimeStateChip[state="warning"] { background: #FFF5D8; border-color: #EDD38B; color: #86620B; }
+QPushButton#floatingStatusButton {
+    background: #EDF2F7; border-color: #D3DFEC; color: #556B85;
+}
+QPushButton#floatingStatusButton:hover { background: #EAF1F8; border-color: #9CB6D1; }
+QPushButton#floatingStatusButton:checked {
+    background: #E0F7EE; border-color: #8DDBC0; color: #187352;
+}
+QPushButton#floatingStatusButton:checked:hover {
+    background: #D4F2E5; border-color: #70CBAE;
+}
+QPushButton#floatingStatusButton:pressed { background: #DCE8F3; }
 QFrame#timingCallout { background: #F4F9FC; border-color: #C9D8E8; }
 QLabel#timingTitle { color: #16835F; }
 QLabel#updateDialogTitle { color: #14233A; }
