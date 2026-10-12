@@ -17,6 +17,8 @@ from fishing_assistant.engine import (
     FishingEngine,
     IconColorSignals,
     IconState,
+    StaminaBarSample,
+    StaminaMidpointState,
 )
 from fishing_assistant.window_target import WindowInfo
 
@@ -767,7 +769,13 @@ class EscapeWatchCharacterizationTests(unittest.TestCase):
             clock.return_value = 100.0
             engine._process_frame(1985, config, IconState.FISH_HOOKED)
             if stamina_seen:
-                engine._stamina_bar_seen = True
+                engine._observe_stamina_bar(
+                    StaminaBarSample(
+                        120,
+                        (100, 100),
+                        midpoint_state=StaminaMidpointState.GREEN,
+                    )
+                )
             clock.return_value = 101.0
             engine._process_frame(0, config, IconState.NORMAL)
             clock.return_value = 104.0

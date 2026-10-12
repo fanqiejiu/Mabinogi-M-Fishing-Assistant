@@ -15,6 +15,7 @@ from fishing_assistant.automation.models import (
     EngineEvent,
     EventCallback,
     EventKind,
+    FishingResult,
     IconColorSignals,
     IconState,
     StaminaBarSample,
@@ -28,6 +29,11 @@ from fishing_assistant.automation.recovery import RecoveryMixin
 from fishing_assistant.automation.tasks import TaskControlMixin
 from fishing_assistant.config import AppConfig, load_config, save_config
 from fishing_assistant.diagnostics import record_error
+from fishing_assistant.features.fishing_history.store import (
+    FishingHistoryRecord,
+    FishingHistoryStore,
+    FishingHistorySummary,
+)
 from fishing_assistant.vision.fishing_icons import FishingIconRecognitionMixin
 from fishing_assistant.vision.fishing_stamina import FishingStaminaRecognitionMixin
 from fishing_assistant.vision.ok_templates import OkTemplateRecognitionMixin
@@ -95,6 +101,7 @@ class FishingEngine(
     STAMINA_MIDPOINT_DARK_RATIO = 0.55
     STAMINA_MIDPOINT_DARK_CONFIRM_FRAMES = 2
     STAMINA_MIDPOINT_GREEN_CONFIRM_FRAMES = 2
+    STAMINA_FULL_RECOVERY_RATIO = 0.9
     STARTUP_IDLE_CONFIRM_FRAMES = 2
     ROD_REQUIRED_MATCH_THRESHOLD = 0.72
     INVENTORY_FULL_MATCH_THRESHOLD = 0.70
@@ -118,10 +125,16 @@ class FishingEngine(
     _no_decision_streak = 0
     _last_decided_state: IconState | None = None
 
-    def __init__(self, event_callback: EventCallback | None = None) -> None:
+    def __init__(
+        self,
+        event_callback: EventCallback | None = None,
+        history_store: FishingHistoryStore | None = None,
+    ) -> None:
         self._config = load_config()
         self._config_lock = threading.RLock()
         self._event_callback = event_callback
+        self._fishing_history = history_store or FishingHistoryStore()
+        self._fishing_history_id: int | None = None
         self._enabled = threading.Event()
         self._paused = threading.Event()
         self._craft_session_lock = threading.RLock()
@@ -166,6 +179,18 @@ class FishingEngine(
         self._shadow_prev_icon: IconState | None = None
         self._fish_resolution_pending = False
         self._hook_started_at: float | None = None
+        self._fishing_session_id = 0
+        self._successful_fishing_count = 0
+        self._ordinary_fishing_count = 0
+        self._failed_fishing_count = 0
+        self._fishing_session_active = False
+        self._fish_round_had_stamina = False
+        self._fish_round_depleted = False
+        self._fish_round_rebounded = False
+        self._fish_round_full_recovered = False
+        self._fish_round_initial_width = 0
+        self._fish_round_collect_pressed = False
+        self._fish_round_last_stamina_at = 0.0
         self._stamina_peak_width = 0
         self._stamina_last_width = 0
         self._stamina_low_seen = False
@@ -221,6 +246,7 @@ class FishingEngine(
     def close(self) -> None:
         self._interrupt_generation += 1
         self._enabled.clear()
+        self._finish_fishing_session("application_closed")
         self._shutdown.set()
         if self._listener is not None:
             self._listener.stop()
@@ -229,10 +255,17 @@ class FishingEngine(
         self._close_ok_window_backend()
         if self._shadow_recorder is not None:
             self._shadow_recorder.close()
+        self._fishing_history.close()
 
     def config(self) -> AppConfig:
         with self._config_lock:
             return self._config.copy()
+
+    def fishing_history_sessions(self, limit: int = 100) -> list[FishingHistoryRecord]:
+        return self._fishing_history.list_sessions(limit)
+
+    def fishing_history_summary(self) -> FishingHistorySummary:
+        return self._fishing_history.summary()
 
     def update_config(self, **changes: object) -> AppConfig:
         with self._config_lock:

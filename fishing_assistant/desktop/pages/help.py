@@ -45,6 +45,24 @@ class HelpPageMixin:
             card_layout.addWidget(label)
         layout.addWidget(card)
 
+        fishing_stats = Card()
+        fishing_stats_layout = QVBoxLayout(fishing_stats)
+        configure_card_layout(fishing_stats_layout)
+        fishing_stats_layout.addLayout(self._card_heading("本次钓鱼记录"))
+        fishing_stats_label = QLabel(
+            "控制台和悬浮栏显示本次自动钓鱼的上鱼成功、普通成功和失败次数。上鱼成功指按下钓鱼键后"
+            "进度条清空；普通成功指未检测到回弹、进度条自然流失清空；失败指检测到回弹并在填充宽度"
+            "恢复至初始满格约九成后消失。"
+            "三种收鱼模式共用现有体力条识别来判断结果，不增加新的画面识别区域。"
+            "证据不足的轮次会提示且不计入，避免将识别漏帧误报成某一种结果。每次成功启动时本次计数清零。"
+            "“钓鱼历史”保存启动/结束时间和各类次数，展示累计轮次、成功占比、已结束会话的总钓鱼时间及最近 100 条记录；"
+            "数据仅保存在本机，不会上传；暂停时间包含在会话时长中，异常退出的未完成会话会标记为中断。"
+        )
+        fishing_stats_label.setWordWrap(True)
+        fishing_stats_label.setObjectName("helpStep")
+        fishing_stats_layout.addWidget(fishing_stats_label)
+        layout.addWidget(fishing_stats)
+
         window_help = Card()
         window_layout = QVBoxLayout(window_help)
         configure_card_layout(window_layout)

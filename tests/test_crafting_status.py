@@ -8,6 +8,7 @@ from fishing_assistant.config import AppConfig
 from fishing_assistant.desktop.main_window import MainWindow
 from fishing_assistant.engine import EngineEvent, EventKind
 from fishing_assistant.features.crafting.model import CraftProgress
+from fishing_assistant.features.fishing_history.store import FishingHistorySummary
 
 
 class CraftStatusTests(unittest.TestCase):
@@ -23,6 +24,10 @@ class CraftStatusTests(unittest.TestCase):
         self.engine.is_monitoring.return_value = False
         self.engine.is_crafting.return_value = False
         self.engine.is_paused.return_value = False
+        self.engine.fishing_history_summary.return_value = FishingHistorySummary(
+            0, 0, 0, 0, 0
+        )
+        self.engine.fishing_history_sessions.return_value = []
         self.engine._interrupt_generation = 1
         with patch("fishing_assistant.window_target.list_target_windows", return_value=[]):
             self.window = MainWindow(self.engine)

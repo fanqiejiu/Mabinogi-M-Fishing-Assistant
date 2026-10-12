@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QApplication
 from .constants import APP_ICON_PATH, APP_NAME
 from .diagnostics import record_error
 from .engine import FishingEngine
+from .features.fishing_history.store import FishingHistoryStore
 from .splash import create_splash
 from .startup_guard import prepare_windows_startup
 from .ui import MainWindow
@@ -38,7 +39,7 @@ def _run_application() -> int:
     splash.show()
     app.processEvents()
 
-    engine = FishingEngine()
+    engine = FishingEngine(history_store=FishingHistoryStore.default())
     window = MainWindow(engine)
     engine.start()
     window.show()

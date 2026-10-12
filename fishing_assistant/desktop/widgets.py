@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFrame,
     QLabel,
+    QSizePolicy,
     QSlider,
     QSpinBox,
     QTabBar,
@@ -33,6 +34,9 @@ class Card(QFrame):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("card")
+        self.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
 
 
 class DetailsPanel(QWidget):

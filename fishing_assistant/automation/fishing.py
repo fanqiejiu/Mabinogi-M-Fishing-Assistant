@@ -6,6 +6,7 @@ import time
 from fishing_assistant import window_target
 from fishing_assistant.automation.models import (
     EventKind,
+    FishingResult,
     IconState,
     StaminaBarSample,
     StaminaMidpointState,
@@ -135,7 +136,9 @@ class FishingFlowMixin:
         self._clear_escape_watch()
         self._fish_resolution_pending = True
         self._reset_stamina_tracking()
+        self._reset_fishing_round_tracking()
         self._hook_started_at = now
+        self._observe_stamina_bar(stamina_sample)
         strategy = self._catch_strategy(config)
         if strategy == "instant":
             self._collect_fish(now, config, "模式 3：检测到上钩图标，已立即按 Space 收杆。")
@@ -177,7 +180,6 @@ class FishingFlowMixin:
                 "模式一安全门：尚未找到体力条。" + fallback,
                 monitoring=True,
             )
-        self._observe_stamina_bar(stamina_sample)
 
     def _collect_fish(
         self,
@@ -202,6 +204,7 @@ class FishingFlowMixin:
             return
         self._press_key("space", config)
         self._last_press_at = now
+        self._fish_round_collect_pressed = True
         self._fish_resolution_pending = False
         self._waiting_for_clear = True
         self._clear_escape_watch()
@@ -263,6 +266,8 @@ class FishingFlowMixin:
         self._escape_candidate_stamina_seen = False
         self._reset_stamina_tracking()
 
+        self._record_fishing_session_result(FishingResult.FAILURE)
+        self._reset_fishing_round_tracking()
         learned_seconds = round(elapsed, 2)
         self.update_config(learned_escape_seconds=learned_seconds)
         target, margin = self.learned_collect_timing(learned_seconds)
@@ -292,10 +297,12 @@ class FishingFlowMixin:
         *,
         ready_visible: bool = False,
     ) -> None:
-        stamina_seen = self._escape_candidate_stamina_seen
+        stamina_seen = self._fish_round_had_stamina
         self._escape_watch_until = 0.0
         self._escape_candidate_elapsed = 0.0
         self._escape_candidate_stamina_seen = False
+        if stamina_seen:
+            self._finish_uncollected_fishing_round()
         if ready_visible:
             self._schedule_recast(
                 now, config, "可抛竿鱼竿图标已恢复"
@@ -321,12 +328,18 @@ class FishingFlowMixin:
     def _observe_stamina_bar(self, sample: StaminaBarSample | None) -> bool:
         if sample is None:
             return False
+        self._fish_round_had_stamina = True
+        if not self._fish_round_depleted:
+            self._fish_round_initial_width = max(
+                self._fish_round_initial_width, sample.fill_width
+            )
         self._stamina_bar_seen = True
         width = sample.fill_width
         state = sample.midpoint_state
         self._stamina_sample_count += 1
         observed_at = time.monotonic()
         self._last_stamina_seen_at = observed_at
+        self._fish_round_last_stamina_at = observed_at
         self._stamina_last_center = sample.center
         self._stamina_midpoint_state = state
 
@@ -344,6 +357,14 @@ class FishingFlowMixin:
         else:
             self._stamina_peak_width = max(previous_peak, width)
         self._stamina_last_width = width
+        # Tolerate fill-width measurement jitter while requiring a near-full refill.
+        if (
+            self._fish_round_rebounded
+            and self._fish_round_initial_width > 0
+            and width
+            >= self._fish_round_initial_width * self.STAMINA_FULL_RECOVERY_RATIO
+        ):
+            self._fish_round_full_recovered = True
 
         if observed_at - self._last_stamina_observation_log_at >= 0.9:
             self._emit(
@@ -381,6 +402,7 @@ class FishingFlowMixin:
                 >= self.STAMINA_MIDPOINT_DARK_CONFIRM_FRAMES
             ):
                 self._stamina_low_seen = True
+                self._fish_round_depleted = True
                 self._emit(
                     EventKind.INFO,
                     "体力条中点已连续变灰：确认第一次跌破半条；"
@@ -402,6 +424,7 @@ class FishingFlowMixin:
                 self._stamina_midpoint_green_frames
                 >= self.STAMINA_MIDPOINT_GREEN_CONFIRM_FRAMES
             ):
+                self._fish_round_rebounded = True
                 self._emit(
                     EventKind.INFO,
                     "体力条中点已连续恢复绿色：确认活鱼反弹，达到收鱼条件。",
@@ -412,6 +435,47 @@ class FishingFlowMixin:
             self._stamina_midpoint_green_frames = 0
             self._stamina_rebound_started = False
         return False
+
+    def _finish_uncollected_fishing_round(self) -> None:
+        if self._fish_round_full_recovered:
+            self._record_fishing_session_result(FishingResult.FAILURE)
+        elif not self._fish_round_rebounded:
+            self._record_fishing_session_result(FishingResult.ORDINARY)
+        else:
+            self._emit(
+                EventKind.WARNING,
+                "检测到体力条回弹，但未能确认重新涨满；本轮暂不计入三类结果，"
+                "以免把识别漏帧误报为失败或普通成功。",
+                monitoring=True,
+            )
+        self._fish_resolution_pending = False
+        self._waiting_for_clear = False
+        self._reset_stamina_tracking()
+        self._reset_fishing_round_tracking()
+
+    def _finish_collected_fishing_round(self) -> None:
+        if not self._fish_round_had_stamina:
+            self._emit(
+                EventKind.WARNING,
+                "收鱼操作后目标消失，但本轮未确认体力条；"
+                "为避免误分类，本轮未计入三类结果。",
+                monitoring=True,
+            )
+        elif self._fish_round_full_recovered:
+            self._record_fishing_session_result(FishingResult.FAILURE)
+        elif self._fish_round_collect_pressed:
+            self._record_fishing_session_result(FishingResult.CATCH)
+        elif not self._fish_round_rebounded:
+            self._record_fishing_session_result(FishingResult.ORDINARY)
+        else:
+            self._emit(
+                EventKind.WARNING,
+                "检测到体力条回弹，但结果证据不完整；本轮暂不计数。",
+                monitoring=True,
+            )
+        self._waiting_for_clear = False
+        self._reset_stamina_tracking()
+        self._reset_fishing_round_tracking()
 
     def _metric_message(self, icon_state: IconState, now: float, config: AppConfig) -> str:
         if self._fish_resolution_pending:

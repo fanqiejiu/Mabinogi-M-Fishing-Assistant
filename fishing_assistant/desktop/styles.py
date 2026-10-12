@@ -25,6 +25,49 @@ QFrame#card, QFrame#metricCard {
     border-radius: 10px;
 }
 QFrame#metricCard { border-radius: 12px; background: #0D192A; }
+QTableWidget#fishingHistoryTable {
+    background-color: #0D192A;
+    alternate-background-color: #111D2F;
+    color: #DDE8F5;
+    gridline-color: #263A54;
+    border: 1px solid #263A54;
+    border-radius: 8px;
+    selection-background-color: #1C5448;
+    selection-color: #F3FFF9;
+}
+QTableWidget#fishingHistoryTable::item { padding: 6px 8px; }
+QTableWidget#fishingHistoryTable::item:selected {
+    background-color: #1C5448;
+    color: #F3FFF9;
+}
+QTableWidget#fishingHistoryTable QHeaderView::section {
+    background-color: #17263A;
+    color: #AFC3DA;
+    border: 0;
+    border-right: 1px solid #263A54;
+    border-bottom: 1px solid #263A54;
+    padding: 8px;
+    font-weight: 700;
+}
+QHeaderView#fishingHistoryRowHeader {
+    background-color: #17263A;
+    color: #AFC3DA;
+}
+QHeaderView#fishingHistoryRowHeader::section {
+    background-color: #17263A;
+    color: #AFC3DA;
+    border: 0;
+    border-right: 1px solid #263A54;
+    border-bottom: 1px solid #263A54;
+    padding: 4px;
+    font-weight: 700;
+}
+QTableCornerButton::section {
+    background-color: #17263A;
+    border: 0;
+    border-right: 1px solid #263A54;
+    border-bottom: 1px solid #263A54;
+}
 QFrame#backendOptions, QFrame#strategyOption {
     background: #0D192A; border: 1px solid #263A54; border-radius: 10px;
 }
@@ -173,6 +216,40 @@ QWidget { color: #1B2A40; }
 QFrame#sidebar { background: #FFFFFF; border-right-color: #D9E3EF; }
 QFrame#card, QFrame#metricCard { background: #FFFFFF; border-color: #D7E2EE; }
 QFrame#metricCard { background: #F8FBFE; }
+QTableWidget#fishingHistoryTable {
+    background-color: #FFFFFF;
+    alternate-background-color: #F4F8FC;
+    color: #1C304A;
+    gridline-color: #D7E2EE;
+    border-color: #D7E2EE;
+    selection-background-color: #DDF5EA;
+    selection-color: #107450;
+}
+QTableWidget#fishingHistoryTable::item:selected {
+    background-color: #DDF5EA;
+    color: #107450;
+}
+QTableWidget#fishingHistoryTable QHeaderView::section {
+    background-color: #EAF1F8;
+    color: #304A66;
+    border-right-color: #D7E2EE;
+    border-bottom-color: #D7E2EE;
+}
+QHeaderView#fishingHistoryRowHeader {
+    background-color: #EAF1F8;
+    color: #304A66;
+}
+QHeaderView#fishingHistoryRowHeader::section {
+    background-color: #EAF1F8;
+    color: #304A66;
+    border-right-color: #D7E2EE;
+    border-bottom-color: #D7E2EE;
+}
+QTableCornerButton::section {
+    background-color: #EAF1F8;
+    border-right-color: #D7E2EE;
+    border-bottom-color: #D7E2EE;
+}
 QFrame#backendOptions, QFrame#strategyOption, QFrame#debugOption { background: #F8FBFE; border-color: #D4E0EC; }
 QFrame#backendOptions[modeActive="true"] { background: #ECFAF5; border-color: #70CBAE; }
 QFrame#backendOptions[modeActive="true"] QLabel#formLabel { color: #163F34; }

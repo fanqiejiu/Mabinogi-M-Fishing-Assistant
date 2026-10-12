@@ -43,6 +43,7 @@ class MonitorMixin:
                         if self._operation_active(generation):
                             request[0].stop(f"自动制作异常，已停止：{error}", error=True)
                             self._enabled.clear()
+                            self._finish_fishing_session("automatic_error")
                             self._emit_crafting(request[0].progress(time.monotonic(), generation), log=True)
                         if self._craft_request is request and generation == self._interrupt_generation:
                             self._craft_request = None
@@ -87,12 +88,12 @@ class MonitorMixin:
                     escape_message_confidence = 0.0
                     rod_required_confidence: float | None = None
                     inventory_full_confidence: float | None = None
-                    if strategy == "stamina_bounce" and (
+                    if (
                         icon_state == IconState.FISH_HOOKED
                         or self._fish_resolution_pending
+                        or self._waiting_for_clear
                     ):
-                        # 上钩一经确认便持续扫描整张画面；右下角图标短暂漏识别
-                        # 不能中断角色头顶绿条的下降/反弹序列。
+                        # All catch strategies share result tracking for the stamina bar.
                         stamina_sample = self._capture_stamina_sample(
                             screen, config, loop_now
                         )
@@ -179,6 +180,7 @@ class MonitorMixin:
                     else:
                         total_failures = consecutive_failures + 1
                         self._enabled.clear()
+                        self._finish_fishing_session("recognition_error")
                         self._emit(
                             EventKind.ERROR,
                             f"{source}已暂停：连续失败 {total_failures} 次，"
@@ -194,6 +196,7 @@ class MonitorMixin:
         except Exception as error:  # pragma: no cover - mss 初始化失败
             # 线程即将退出；必须同步清掉监测标志，避免界面停留在“监测中”假状态。
             self._enabled.clear()
+            self._finish_fishing_session("monitor_start_error")
             self._emit(EventKind.ERROR, f"无法启动识别服务：{error}")
         finally:
             self._work_context.generation = None
@@ -340,16 +343,31 @@ class MonitorMixin:
             elif now >= self._escape_watch_until:
                 self._finish_escape_watch(now, config)
 
+        if stamina_sample is not None and (
+            self._fish_resolution_pending or self._waiting_for_clear
+        ):
+            self._clear_frames = 0
+            self._observe_stamina_bar(stamina_sample)
+
         if self._waiting_for_clear:
             # 收杆后游戏会短暂直接恢复“可抛竿”图标。它是比普通清空帧
             # 更强的正向证据：首帧命中就立即续钓，避免 OK 全尺度扫描较慢
             # 时错过短暂图标，随后误等到指南针并执行不必要的 W → S。
-            if icon_state == IconState.READY_TO_CAST:
-                self._waiting_for_clear = False
-                self._clear_frames = 0
+            stamina_gone = (
+                self._fish_round_had_stamina
+                and now - self._fish_round_last_stamina_at
+                >= self.STAMINA_LOST_GRACE_SECONDS
+            )
+            if icon_state == IconState.READY_TO_CAST and (
+                stamina_gone or not self._fish_round_had_stamina
+            ):
+                self._finish_collected_fishing_round()
                 self._schedule_recast(now, config, "收鱼完成，钓鱼图标已恢复")
-            elif self._clear_frames >= config.clear_consecutive_frames:
-                self._waiting_for_clear = False
+            elif (
+                self._clear_frames >= config.clear_consecutive_frames
+                and (stamina_gone or not self._fish_round_had_stamina)
+            ):
+                self._finish_collected_fishing_round()
                 self._schedule_recast(now, config, "收鱼完成")
         elif self._fish_resolution_pending:
             strategy = self._catch_strategy(config)
@@ -361,9 +379,7 @@ class MonitorMixin:
                 )
             elif strategy == "stamina_bounce":
                 if stamina_sample is not None:
-                    # 绿条和中鱼锚点比右下角图标更直接；命中时清掉图标漏识别帧。
-                    self._clear_frames = 0
-                    if self._observe_stamina_bar(stamina_sample):
+                    if self._fish_round_rebounded:
                         self._collect_fish(
                             now,
                             config,
@@ -401,8 +417,23 @@ class MonitorMixin:
                         allow_without_stamina=True,
                     )
             elif not fish_visible and self._clear_frames >= config.clear_consecutive_frames:
-                self._fish_resolution_pending = False
-                self._reset_stamina_tracking()
+                if (
+                    self._fish_round_had_stamina
+                    and self._last_stamina_seen_at
+                    and now - self._last_stamina_seen_at
+                    >= self.STAMINA_LOST_GRACE_SECONDS
+                ):
+                    self._finish_uncollected_fishing_round()
+                else:
+                    self._fish_resolution_pending = False
+                    self._reset_stamina_tracking()
+                    self._reset_fishing_round_tracking()
+                    self._emit(
+                        EventKind.WARNING,
+                        "钓鱼目标已消失，但本轮未确认体力条变化；"
+                        "为避免误分类，未计入上鱼成功、普通成功或失败。",
+                        monitoring=True,
+                    )
                 self._schedule_recast(now, config, "计时目标已消失")
             elif fish_visible and strategy == "fixed_delay":
                 hook_started = self._hook_started_at or now

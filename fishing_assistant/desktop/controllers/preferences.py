@@ -132,6 +132,8 @@ class PreferencesControllerMixin:
         self.setStyleSheet(DAY_STYLE if is_day else NIGHT_STYLE)
         if hasattr(self, "crafting_page"):
             self.crafting_page.set_theme(theme)
+        if hasattr(self, "fishing_history_page"):
+            self.fishing_history_page.set_theme(theme)
         if hasattr(self, "remote_panel"):
             self.remote_panel.set_theme(theme)
         self.floating_status_bar.set_theme(theme)

@@ -50,6 +50,27 @@ class EngineEventsMixin:
 
     def _consume_engine_event(self, event: EngineEvent) -> None:
         self._sync_floating_task_controls()
+        if event.kind == EventKind.FISHING_SESSION_STATS:
+            if event.fishing_session_id < self._fishing_stats_session_id:
+                return
+            self._fishing_stats_session_id = event.fishing_session_id
+            self.fishing_success_metric.value_label.setText(
+                f"{event.successful_fishing_count} 次"
+            )
+            self.fishing_ordinary_metric.value_label.setText(
+                f"{event.ordinary_fishing_count} 次"
+            )
+            self.fishing_failure_metric.value_label.setText(
+                f"{event.failed_fishing_count} 次"
+            )
+            self.floating_status_bar.set_fishing_session_stats(
+                event.successful_fishing_count,
+                event.ordinary_fishing_count,
+                event.failed_fishing_count,
+            )
+            if hasattr(self, "fishing_history_page"):
+                self.fishing_history_page.refresh()
+            return
         if event.kind == EventKind.PAUSE:
             if not self.engine.is_monitoring():
                 return  # 停止后才到达的暂停/继续通知不覆盖“已停止”。

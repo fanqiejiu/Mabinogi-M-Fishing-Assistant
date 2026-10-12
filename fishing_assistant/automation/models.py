@@ -10,6 +10,7 @@ from typing import Callable
 class EventKind(str, Enum):
     PAUSE = "pause"
     CRAFTING = "crafting"
+    FISHING_SESSION_STATS = "fishing_session_stats"
     INFO = "info"
     SUCCESS = "success"
     WARNING = "warning"
@@ -18,6 +19,13 @@ class EventKind(str, Enum):
     CONFIG = "config"
     STATE = "state"
     DIAGNOSTIC = "diagnostic"
+
+class FishingResult(str, Enum):
+    """One resolved fishing round."""
+
+    CATCH = "catch"
+    ORDINARY = "ordinary"
+    FAILURE = "failure"
 
 class IconState(str, Enum):
     NORMAL = "normal"
@@ -85,5 +93,9 @@ class EngineEvent:
     snapshot_state: str = ""
     crafting: object | None = None
     crafting_log: bool = False
+    fishing_session_id: int = 0
+    successful_fishing_count: int = 0
+    ordinary_fishing_count: int = 0
+    failed_fishing_count: int = 0
 
 EventCallback = Callable[[EngineEvent], None]
