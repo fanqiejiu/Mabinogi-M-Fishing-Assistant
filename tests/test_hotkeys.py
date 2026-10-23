@@ -17,6 +17,7 @@ from fishing_assistant.config import (
 from fishing_assistant.engine import FishingEngine, EventKind
 from fishing_assistant.desktop.main_window import MainWindow
 from fishing_assistant.desktop.widgets import ScrollSafeComboBox
+from fishing_assistant.features.fishing_history.store import FishingHistorySummary
 
 
 class StopHotkeyConfigTests(unittest.TestCase):
@@ -147,6 +148,8 @@ class StopHotkeyUiTests(unittest.TestCase):
 
     def test_choices_save_update_hints_and_ignore_scroll_in_both_themes(self):
         engine = MagicMock()
+        engine.fishing_history_summary.return_value = FishingHistorySummary(0, 0, 0, 0, 0.0)
+        engine.fishing_history_sessions.return_value = []
         config = [AppConfig(stop_hotkey="f11", voice_alerts_enabled=False)]
         engine.config.side_effect = lambda: config[0].copy()
         def update(**changes):
@@ -160,7 +163,7 @@ class StopHotkeyUiTests(unittest.TestCase):
         try:
             self.assertEqual(window.stop_hotkey_combo.currentData(), "f11")
             engine.update_config.assert_not_called()
-            window.resize(920, 680)
+            window.resize(window.minimumWidth(), 680)
             window.show()
             window._select_page(4)
             window.stack.widget(4).select_section("general")
