@@ -19,6 +19,7 @@ from fishing_assistant.constants import (
     GITHUB_REPOSITORY,
     REMOTE_PREVIEW_ENABLED,
 )
+from fishing_assistant.config import STOP_HOTKEY_LABELS
 from fishing_assistant.desktop.widgets import Card, DetailsPanel, ScrollSafeComboBox, ScrollSafeSlider
 from fishing_assistant.desktop.pages.sectioned import SectionedPage
 from fishing_assistant.diagnostics import LOG_DIR, VISION_DIAGNOSTICS_DIR
@@ -26,6 +27,31 @@ from fishing_assistant.diagnostics import LOG_DIR, VISION_DIAGNOSTICS_DIR
 
 class SettingsPageMixin:
     """应用设置、语音、诊断信息与调试区域布局；由 MainWindow 组装，不单独实例化。"""
+
+    def _build_hotkey_card(self) -> Card:
+        card = Card()
+        layout = QVBoxLayout(card)
+        configure_card_layout(layout)
+        layout.addLayout(self._card_heading("快捷键"))
+        row = QHBoxLayout()
+        label = QLabel("停止快捷键")
+        label.setObjectName("formLabel")
+        row.addWidget(label)
+        self.stop_hotkey_combo = ScrollSafeComboBox()
+        self.stop_hotkey_combo.setAccessibleName("停止快捷键")
+        for key, title in STOP_HOTKEY_LABELS.items():
+            self.stop_hotkey_combo.addItem(title + ("（默认）" if key == "esc" else ""), key)
+        self.stop_hotkey_combo.setToolTip(
+            "全局停止当前钓鱼、制作或背包测试；修改后立即生效。"
+            "在其他游戏中常用 Esc 时，请改键或选择“不启用”。F7 / F8 / F9 保留原功能。"
+        )
+        row.addWidget(self.stop_hotkey_combo, 1)
+        layout.addLayout(row)
+        hint = QLabel("F8 始终保留开始 / 停止功能。")
+        hint.setObjectName("helper")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        return card
 
     def _build_hardware_card(self) -> Card:
         card = Card()
@@ -124,6 +150,7 @@ class SettingsPageMixin:
             from fishing_assistant.remote_ui import RemotePanel
             self.remote_panel = RemotePanel(self.engine)
             general.addWidget(self.remote_panel)
+        general.addWidget(self._build_hotkey_card())
         general.addWidget(self._build_voice_alert_card())
 
         floating_card = Card()

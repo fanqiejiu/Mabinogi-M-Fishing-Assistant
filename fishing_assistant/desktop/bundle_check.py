@@ -45,6 +45,12 @@ def verify_bundle(report_path: str) -> int:
             window.crafting_hub.setCurrentIndex(1)
             app.processEvents()
         assert not engine.is_monitoring() and not engine.is_crafting()
+        for key, text in (("none", "F8"), ("f10", "F8 / F10"), ("esc", "F8 / Esc")):
+            index = window.stop_hotkey_combo.findData(key)
+            assert index >= 0, f"stop hotkey choice missing: {key}"
+            window.stop_hotkey_combo.setCurrentIndex(index)
+            assert engine.config().stop_hotkey == key
+            assert window.crafting_page.stop.text() == f"停止（{text}）"
         assert not REMOTE_PREVIEW_ENABLED
         checkmark = resource_path("fishing_assistant", "assets", "checkmark.svg")
         assert QSvgRenderer(str(checkmark)).isValid(), "checkbox SVG unavailable"

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from PySide6.QtGui import QIcon
 from fishing_assistant.constants import resource_path
+from fishing_assistant.config import STOP_HOTKEY_LABELS, normalize_stop_hotkey, stop_shortcuts_label
 from fishing_assistant.desktop.styles import DAY_STYLE, NIGHT_STYLE
 from fishing_assistant.engine import EventKind
 from fishing_assistant.voice_alerts import F7_CALIBRATION_CUE
@@ -10,6 +11,20 @@ from fishing_assistant.voice_alerts import F7_CALIBRATION_CUE
 
 class PreferencesControllerMixin:
     """语音、悬浮栏和主题偏好的交互；由 MainWindow 组装，不单独实例化。"""
+
+    def _stop_hotkey_changed(self) -> None:
+        key = str(self.stop_hotkey_combo.currentData())
+        self.engine.update_config(stop_hotkey=key)
+        self._sync_stop_hotkey_labels()
+
+    def _sync_stop_hotkey_labels(self) -> None:
+        key = normalize_stop_hotkey(self.engine.config().stop_hotkey)
+        self.stop_hotkey_help_key.setText(STOP_HOTKEY_LABELS[key])
+        self.stop_hotkey_help_detail.setText(
+            "已关闭额外停止键；F8 仍可停止任务。"
+            if key == "none" else "紧急停止当前任务；可在“设置 → 常规 → 快捷键”修改或关闭。"
+        )
+        self.crafting_page.stop.setText(f"停止（{stop_shortcuts_label(key)}）")
 
     def _voice_alerts_toggled(self, checked: bool) -> None:
         character = str(self.voice_character_combo.currentData() or "")

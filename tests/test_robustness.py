@@ -311,7 +311,7 @@ class HotkeyListenerRobustnessTests(unittest.TestCase):
         engine = FishingEngine()
         with patch.object(
             engine, "calibrate_from_cursor", side_effect=RuntimeError("boom")
-        ), patch("fishing_assistant.engine.record_error") as recorded:
+        ), patch("fishing_assistant.automation.hotkeys.record_error") as recorded:
             try:
                 engine._on_key_press(keyboard.Key.f7)
             except RuntimeError:

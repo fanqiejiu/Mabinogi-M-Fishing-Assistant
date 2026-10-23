@@ -234,6 +234,7 @@ class ConfigurationControllerMixin:
             self.inventory_cleanup_check,
             self.voice_alerts_check,
             self.voice_character_combo,
+            self.stop_hotkey_combo,
             self.floating_status_check,
             self.floating_opacity_slider,
             self.github_auto_check,
@@ -287,6 +288,7 @@ class ConfigurationControllerMixin:
             config.inventory_auto_cleanup_enabled
         )
         self.voice_alerts_check.setChecked(config.voice_alerts_enabled)
+        self._select_combo_data(self.stop_hotkey_combo, config.stop_hotkey)
         self._select_combo_data(
             self.voice_character_combo, config.voice_character
         )
@@ -311,8 +313,10 @@ class ConfigurationControllerMixin:
         self._sync_floating_status_visibility()
         self._sync_inventory_cleanup_debug_controls()
         self._sync_voice_controls()
+        self._sync_stop_hotkey_labels()
 
     def _connect_controls(self) -> None:
+        self.stop_hotkey_combo.currentIndexChanged.connect(self._stop_hotkey_changed)
         self.monitor_combo.currentIndexChanged.connect(self._save_profile)
         self.mode_combo.currentIndexChanged.connect(self._save_profile)
         self.resolution_combo.currentIndexChanged.connect(self._save_profile)

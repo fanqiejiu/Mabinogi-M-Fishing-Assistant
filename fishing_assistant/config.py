@@ -26,6 +26,23 @@ _COMMON_RESOLUTIONS = ((1920, 1080), (2560, 1440), (3840, 2160))
 _COMMON_SCALES = (1.0, 4 / 3, 2.0)
 _RESOLUTION_PATTERN = re.compile(r"(\d{3,5})\s*[×xX*]\s*(\d{3,5})")
 
+# F7/F8/F9 保留给校准、启停、诊断；不提供游戏常用字母键，避免内部送键误触。
+STOP_HOTKEY_LABELS = {
+    "none": "不启用", "esc": "Esc", "pause": "Pause",
+    **{f"f{number}": f"F{number}" for number in (1, 2, 3, 4, 5, 6, 10, 11, 12)},
+}
+
+
+def normalize_stop_hotkey(value: object) -> str:
+    key = value.strip().lower() if isinstance(value, str) else "esc"
+    return key if key in STOP_HOTKEY_LABELS else "esc"
+
+
+def stop_shortcuts_label(value: object) -> str:
+    """当前可用的停止键；关闭额外停止键时仍保留 F8。"""
+    key = normalize_stop_hotkey(value)
+    return "F8" if key == "none" else f"F8 / {STOP_HOTKEY_LABELS[key]}"
+
 
 def parse_resolution(value: str) -> tuple[int, int] | None:
     """从 UI 显示文本中提取宽高；兼容乘号和普通 x。"""
@@ -79,6 +96,8 @@ class AppConfig:
     display_mode: str = "borderless"
     selected_resolution: str = "1920 × 1080"
     ui_theme: str = "night"
+    # 额外的全局停止键；none 关闭，旧配置继续使用 Esc。F8 启停固定保留。
+    stop_hotkey: str = "esc"
     roi_width: int = 160
     roi_height: int = 180
     # 默认按实际游戏窗口/所选分辨率缩放；关闭后直接使用上面两个手动值。
@@ -353,6 +372,7 @@ def _config_from_raw(raw: dict) -> AppConfig:
     # 更新源始终固定在项目自身仓库；是否启动时检查由用户设置决定。
     raw["github_repository"] = GITHUB_REPOSITORY
     raw["github_auto_check"] = bool(raw.get("github_auto_check", True))
+    raw["stop_hotkey"] = normalize_stop_hotkey(raw.get("stop_hotkey", "esc"))
 
     valid_names = {field.name for field in fields(AppConfig)}
     from .crafting import RECIPE_BY_KEY

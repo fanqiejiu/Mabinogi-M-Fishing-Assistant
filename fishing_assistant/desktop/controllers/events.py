@@ -101,7 +101,7 @@ class EngineEventsMixin:
             self.snapshot_button.setText("正在保存…" if saving else "保存现场（F9）")
             if saving:
                 self.view_snapshot_button.setEnabled(False)
-                self.snapshot_status.setText("正在保存识别现场…F8 / Esc 仍可使用。")
+                self.snapshot_status.setText("正在保存识别现场…F8 和设置的停止快捷键仍可使用。")
             else:
                 self._last_snapshot_path = event.debug_image
                 self._last_snapshot_bundle = event.diagnostic_path

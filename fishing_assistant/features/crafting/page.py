@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 )
 from datetime import datetime
 from fishing_assistant import window_target
+from fishing_assistant.config import stop_shortcuts_label
 from fishing_assistant.features.crafting.model import (
     CATEGORIES,
     CraftOptions,
@@ -108,7 +109,7 @@ class CraftingPage(QScrollArea):
         target_layout.addLayout(row)
         self.start = QPushButton("开始自动制作")
         self.start.setObjectName("primaryButton")
-        self.stop = QPushButton("停止（F8 / Esc）")
+        self.stop = QPushButton(f"停止（{stop_shortcuts_label(engine.config().stop_hotkey)}）")
         self.stop.setToolTip("停止助手操作，不会取消游戏中已加入的制作队列。")
         self.stop.setObjectName("dangerButton")
         self.start.clicked.connect(self.start_task)

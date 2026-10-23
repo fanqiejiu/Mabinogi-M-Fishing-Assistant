@@ -4,7 +4,7 @@
   <img src="fishing_assistant/assets/tomato_fish_icon.png" width="112" alt="番茄鱼项目图标">
 </p>
 
-<p align="center">Windows 本地钓鱼辅助工具 · v0.8.0</p>
+<p align="center">Windows 本地钓鱼辅助工具 · v0.8.1</p>
 
 <p align="center">
   <a href="https://github.com/fanqiejiu/Mabinogi-M-Fishing-Assistant/releases">📥 下载 Release</a> ·
@@ -81,13 +81,15 @@ cd Mabinogi-M-Fishing-Assistant
 | `F7` | 校准钓鱼按钮中心 |
 | `F8` | 开始钓鱼 / 停止当前任务 |
 | `F9` | 保存识别区域与完整诊断包 |
-| `Esc` | 紧急停止 |
+| `Esc`（默认，可改键或关闭） | 紧急停止当前任务 |
 
 ### F9 怎么用
 
 F9 是保存识别现场，不是开始钓鱼，也不会重新校准。图标明明出现却没反应、体力条不触发时，保留当时的画面按一次 F9；先完成 F7 校准即可，不必启动监测。
 
 保存会在后台处理，不占用界面和快捷键监听线程。控制台会显示保存结果，点“查看截图”检查圆形按钮是否完整，点“打开诊断目录”找到文件。保存期间再按 F9 不会重复排队。
+
+在其他游戏里频繁使用 Esc 时，到“设置 → 常规 → 快捷键”更改“停止快捷键”，可选择 Esc、Pause、F1～F6、F10～F12 或“不启用”。更改立即生效并自动保存；改键或关闭后 Esc 不再停止后台任务。F7、F8、F9 保留原功能，F8 始终可开始钓鱼或停止当前任务。该选项只影响助手的全局停止监听，不影响游戏中的 Esc，也不影响助手退出背包或加工详情时发送 Esc。
 
 每次保存的文件带时间，不覆盖上一次，位置在 `%LOCALAPPDATA%\MabinogiFishingHelper\vision-diagnostics\`。ZIP 中有：
 

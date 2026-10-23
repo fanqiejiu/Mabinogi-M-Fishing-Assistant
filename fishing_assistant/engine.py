@@ -9,6 +9,7 @@ from fishing_assistant.automation.capture import CaptureMixin
 from fishing_assistant.automation.diagnostics import DiagnosticsMixin
 from fishing_assistant.automation.fishing import FishingFlowMixin
 from fishing_assistant.automation.input import GameInputMixin
+from fishing_assistant.automation.hotkeys import HotkeyControlMixin
 from fishing_assistant.automation.inventory import InventoryCleanupMixin
 from fishing_assistant.automation.inventory_entry import InventoryEntryMixin
 from fishing_assistant.automation.models import (
@@ -37,6 +38,7 @@ from pynput import keyboard
 
 
 class FishingEngine(
+    HotkeyControlMixin,
     PauseControlMixin,
     TaskControlMixin,
     DiagnosticsMixin,
@@ -215,7 +217,7 @@ class FishingEngine(
         self._listener.start()
         self._emit(
             EventKind.INFO,
-            "助手已就绪：将鼠标停在钓鱼按钮中心后按 F7 即刻校准（不会移动鼠标）；F8 开始/暂停，F9 保存识别区域和诊断。",
+            "助手已就绪：将鼠标停在钓鱼按钮中心后按 F7 即刻校准（不会移动鼠标）；F8 开始/停止，F9 保存识别区域和诊断。",
         )
 
     def close(self) -> None:
@@ -248,38 +250,6 @@ class FishingEngine(
     _UNRECOGNIZED_SNAPSHOT_MAX = 3
 
     OK_ICON_FULL_SCALES = np.linspace(0.78, 1.28, 11)
-
-    def _on_key_press(
-        self, key: keyboard.Key | keyboard.KeyCode | None
-    ) -> bool | None:
-        # 回调里逃逸的异常会杀死 pynput 监听线程，之后所有快捷键
-        # （包括 Esc 紧急停止）都会静默失效，因此必须整体防护。
-        try:
-            if key in (keyboard.Key.f7, keyboard.Key.f8, keyboard.Key.f9):
-                if key in self._hotkeys_down:
-                    return None
-                self._hotkeys_down.add(key)
-            if key == keyboard.Key.f7:
-                self.calibrate_from_cursor()
-            elif key == keyboard.Key.f8:
-                self.toggle_monitoring()
-            elif key == keyboard.Key.f9:
-                self.request_debug_capture()
-            elif key == keyboard.Key.esc:
-                # 暂停后 Esc 属于游戏操作，不再重复暂停或播报紧急停止。
-                if not self.is_monitoring():
-                    return None
-                if time.monotonic() < self._ignore_esc_until:
-                    return None
-                self.set_monitoring(False)
-                self._emit(EventKind.WARNING, "已触发紧急停止。")
-        except Exception as error:
-            record_error("hotkey handler", error)
-            self._emit(EventKind.WARNING, f"快捷键处理出现异常：{error}")
-        return None
-
-    def _on_key_release(self, key: keyboard.Key | keyboard.KeyCode | None) -> None:
-        self._hotkeys_down.discard(key)
 
     def _operation_active(self, generation: int) -> bool:
         return (

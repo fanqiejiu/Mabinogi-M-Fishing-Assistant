@@ -33,6 +33,7 @@ fishing_assistant/
 │   ├── inventory_entry.py   识别背包当前页面，安全进入整理面板
 │   ├── capture.py           截图、坐标换算和 OK 后台实例管理
 │   ├── input.py             游戏按键、鼠标、后台悬停操作
+│   ├── hotkeys.py           全局快捷键分发、按住去重及可选停止键
 │   └── diagnostics.py       F9 和连续识别失败现场保存
 ├── vision/                  图片识别算法
 │   ├── fishing_icons.py     钓鱼图标、指南针及手动选择的像素兼容识别
@@ -92,6 +93,7 @@ remote/                     预备 Android/中转项目，尚未默认启用
 | 背包安全确认和清理顺序 | `automation/inventory.py`；图片识别在 `inventory_cleanup.py` |
 | 制作配方、时间、加工次数、队列容量 | `features/crafting/model.py`、`features/crafting/queue_recognition.py` |
 | 新增配置项 | `config.py` → 对应页面 → 对应 controller → 对应流程 → 测试 |
+| 全局停止快捷键 | `automation/hotkeys.py`；允许的键和默认值在 `config.py`，界面在设置常规页 |
 
 ## 调用关系和状态归属
 
@@ -125,7 +127,7 @@ from fishing_assistant.crafting import CraftOptions, CraftSession
 
 不要削弱以下规则：
 
-- F8 / Esc 停止后，旧帧和旧任务不得继续送键。
+- F8 / 用户设置的停止快捷键停止后，旧帧和旧任务不得继续送键。Esc 仅为默认值，关闭或改键后不再作为全局停止键；内部游戏 Esc 和合成事件防误触保持独立。
 - 钓鱼、自动制作、背包测试不得并行操作游戏。
 - OK 识别失败不能自动切回用户未选择的像素方案。
 - 背包清理默认关闭；执行前反复确认大胆整理已经关闭，不确定就停止。

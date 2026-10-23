@@ -83,7 +83,7 @@ class FloatingStatusBar(QWidget):
         self.pause_button.clicked.connect(self.pause_requested.emit)
         self.resume_button.clicked.connect(self.resume_requested.emit)
         self.pause_button.setToolTip("暂停当前任务。背包整理中会安全停止，不自动继续清理。")
-        self.resume_button.setToolTip("继续由暂停按钮暂停的任务；F8 / Esc 停止后不会自动重启。")
+        self.resume_button.setToolTip("继续由暂停按钮暂停的任务；F8 或设置的停止快捷键停止后不会自动重启。")
         layout.addLayout(actions)
         self.set_task_controls(False, False)
 
