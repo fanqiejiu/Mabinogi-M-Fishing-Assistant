@@ -25,6 +25,7 @@ from fishing_assistant.desktop.dialogs import (
 from fishing_assistant.desktop.floating_status import FloatingStatusBar
 from fishing_assistant.desktop.main_window import MainWindow
 from fishing_assistant.desktop.pages.sectioned import SectionedPage
+from fishing_assistant.features.fishing_history.store import FishingHistorySummary
 from fishing_assistant.window_target import WindowInfo
 
 
@@ -38,6 +39,10 @@ class TypographyTests(unittest.TestCase):
     def setUp(self):
         self.engine = MagicMock()
         self.engine.config.return_value = AppConfig(voice_alerts_enabled=False)
+        self.engine.fishing_history_summary.return_value = FishingHistorySummary(
+            0, 0, 0, 0, 0
+        )
+        self.engine.fishing_history_sessions.return_value = []
         for name in ("is_monitoring", "is_crafting", "is_paused"):
             getattr(self.engine, name).return_value = False
         with patch("fishing_assistant.window_target.list_target_windows", return_value=[
@@ -45,7 +50,7 @@ class TypographyTests(unittest.TestCase):
         ]):
             self.window = MainWindow(self.engine)
         self.window.setFont(ui_font())
-        self.window.resize(920, 680)
+        self.window.resize(900, 680)
         self.window.show()
         self.app.processEvents()
 

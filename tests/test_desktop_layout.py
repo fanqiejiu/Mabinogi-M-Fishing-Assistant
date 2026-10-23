@@ -7,12 +7,20 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QPoint, QPointF, Qt
 from PySide6.QtGui import QFontDatabase, QWheelEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QLabel, QComboBox, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QLabel,
+    QComboBox,
+    QFrame,
+    QSizePolicy,
+    QWidget,
+)
 
 from fishing_assistant.config import AppConfig
 from fishing_assistant.desktop.design import ui_font
 from fishing_assistant.desktop.main_window import MainWindow
 from fishing_assistant.desktop.pages.sectioned import SectionedPage
+from fishing_assistant.features.fishing_history.store import FishingHistorySummary
 from fishing_assistant.window_target import WindowInfo
 from fishing_assistant.engine import EngineEvent, EventKind
 
@@ -32,6 +40,10 @@ class DesktopLayoutTests(unittest.TestCase):
             self.config = self.config.copy(**changes)
             return self.config.copy()
         self.engine.update_config.side_effect = update
+        self.engine.fishing_history_summary.return_value = FishingHistorySummary(
+            0, 0, 0, 0, 0
+        )
+        self.engine.fishing_history_sessions.return_value = []
         for method in ("is_monitoring", "is_crafting", "is_paused"):
             getattr(self.engine, method).return_value = False
         with patch("fishing_assistant.window_target.list_target_windows", return_value=[
@@ -121,7 +133,7 @@ class DesktopLayoutTests(unittest.TestCase):
         page = self.window.stack.widget(0)
         for theme in ("day", "night"):
             self.window._apply_theme(theme)
-            for size in ((980, 760), (920, 680)):
+            for size in ((980, 760), (900, 680)):
                 self.window.resize(*size)
                 page.verticalScrollBar().setValue(0)
                 self.app.processEvents()
@@ -135,6 +147,39 @@ class DesktopLayoutTests(unittest.TestCase):
                 self.assertEqual(sizes[0], sizes[1])
                 self.assertEqual(sizes[1], sizes[2])
 
+    def test_dashboard_cards_expand_with_available_window_width(self):
+        page = self.window.stack.widget(0)
+        canvas = page.widget()
+        cards = [
+            widget
+            for widget in canvas.findChildren(QFrame, "card")
+            if widget.parentWidget() is canvas
+        ]
+        self.assertEqual(len(cards), 4)
+        self.window.resize(1080, 680)
+        self.app.processEvents()
+        narrow_widths = [card.width() for card in cards]
+        self.assertEqual(self.window.width(), 1080)
+        self.assertEqual(page.horizontalScrollBar().maximum(), 0)
+        self.assertTrue(
+            all(card.width() >= card.minimumSizeHint().width() for card in cards)
+        )
+
+        self.window.resize(1200, 760)
+        self.app.processEvents()
+        wide_widths = [card.width() for card in cards]
+
+        self.assertTrue(
+            all(wide > narrow for narrow, wide in zip(narrow_widths, wide_widths))
+        )
+        self.assertTrue(
+            all(
+                card.sizePolicy().horizontalPolicy()
+                == QSizePolicy.Policy.Expanding
+                for card in cards
+            )
+        )
+
     def test_foreground_mode_exposes_display_configuration(self):
         self.assertTrue(self.window.profile_details.content.isHidden())
         combo = self.window.target_mode_combo
@@ -145,7 +190,7 @@ class DesktopLayoutTests(unittest.TestCase):
 
     def test_sidebar_keeps_application_pages_at_bottom(self):
         buttons = self.window._navigation
-        self.assertEqual([b.text() for b in buttons], ["控制台", "钓鱼设置", "自动制作（测试）", "识别阈值", "设置", "使用说明"])
+        self.assertEqual([b.text() for b in buttons], ["控制台", "钓鱼设置", "自动制作（测试）", "识别阈值", "设置", "使用说明", "钓鱼历史"])
         self.assertGreater(buttons[4].y() - (buttons[3].y() + buttons[3].height()), 50)
 
     def test_capture_input_and_recognition_use_distinct_technical_names(self):

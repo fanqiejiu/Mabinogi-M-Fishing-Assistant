@@ -12,6 +12,7 @@ from PySide6.QtGui import QPalette
 
 from fishing_assistant.config import AppConfig
 from fishing_assistant.engine import FishingEngine
+from fishing_assistant.features.fishing_history.store import FishingHistorySummary
 from fishing_assistant.ui import MainWindow
 
 
@@ -68,7 +69,15 @@ class ArchitectureTests(unittest.TestCase):
                         self.assertNotEqual(node.module, "fishing_assistant.ui", str(path))
 
     def test_new_packages_have_explicit_package_markers(self):
-        for path in ("automation", "desktop", "desktop/pages", "desktop/controllers", "features", "features/crafting"):
+        for path in (
+            "automation",
+            "desktop",
+            "desktop/pages",
+            "desktop/controllers",
+            "features",
+            "features/crafting",
+            "features/fishing_history",
+        ):
             self.assertTrue((PACKAGE / path / "__init__.py").is_file(), path)
 
     def test_crafting_model_stays_independent_of_ui_and_input(self):
@@ -94,6 +103,8 @@ class AllPagesSmokeTests(unittest.TestCase):
         engine.update_config.side_effect = update
         engine.is_monitoring.return_value = False
         engine.is_crafting.return_value = False
+        engine.fishing_history_summary.return_value = FishingHistorySummary(0, 0, 0, 0, 0)
+        engine.fishing_history_sessions.return_value = []
         with patch("fishing_assistant.window_target.list_target_windows", return_value=[]):
             window = MainWindow(engine)
         try:

@@ -179,6 +179,7 @@ class CorrectedDiagnosticIntegrationTest(unittest.TestCase):
         self.assertIsNone(engine._last_diag_snapshot_at)
         self.assertEqual(engine._diag_snapshot_count, 0)
         engine.set_monitoring(False)
+        engine.close()
 
 class CoordinateAndSupportBundleTest(unittest.TestCase):
     def test_secondary_monitor_center_is_converted_to_frame_coordinates(self):

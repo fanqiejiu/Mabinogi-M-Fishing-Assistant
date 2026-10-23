@@ -188,6 +188,7 @@ class InventoryCleanupMixin:
                 )
             else:
                 self._enabled.clear()
+                self._finish_fishing_session("inventory_test_completed")
                 self._emit(
                     EventKind.SUCCESS,
                     "背包清理调试完成：已退出背包，普通监测保持暂停。"
@@ -207,6 +208,7 @@ class InventoryCleanupMixin:
                 return True
             self._interrupt_generation += 1
             self._enabled.clear()
+            self._finish_fishing_session("inventory_error")
             self._reset_detection()
             self._emit(
                 EventKind.ERROR,

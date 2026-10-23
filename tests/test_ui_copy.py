@@ -15,6 +15,7 @@ from fishing_assistant.desktop.main_window import MainWindow
 from fishing_assistant.desktop.widgets import DetailsPanel
 from fishing_assistant.features.crafting.model import CraftProgress
 from fishing_assistant.engine import EngineEvent, EventKind
+from fishing_assistant.features.fishing_history.store import FishingHistorySummary
 from fishing_assistant.window_target import WindowInfo
 
 
@@ -31,6 +32,10 @@ class CompactCopyTests(unittest.TestCase):
             self.config = self.config.copy(**changes)
             return self.config.copy()
         self.engine.update_config.side_effect = update
+        self.engine.fishing_history_summary.return_value = FishingHistorySummary(
+            0, 0, 0, 0, 0
+        )
+        self.engine.fishing_history_sessions.return_value = []
         self.engine.is_monitoring.return_value = False
         self.engine.is_crafting.return_value = False
         self.engine.is_paused.return_value = False

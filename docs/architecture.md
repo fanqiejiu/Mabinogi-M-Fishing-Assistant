@@ -46,6 +46,9 @@ fishing_assistant/
 │   ├── queue_recognition.py  OK 队列格数、多行布局与槽位状态识别
 │   ├── runner.py            队列执行、确认及停止保护
 │   └── page.py              自动制作页面
+├── features/fishing_history/钓鱼会话历史、SQLite 存储与统计页面
+│   ├── store.py             会话持久化、异常中断恢复和累计统计
+│   └── page.py              历史记录表格与统计展示
 ├── features/food/           食物制作预留页面，未开放识别或执行
 ├── window_target.py         Windows 窗口、WGC、PostMessage 适配
 ├── window_geometry.py       OK 客户区帧、物理像素/DPI 上下文和输入前几何校验

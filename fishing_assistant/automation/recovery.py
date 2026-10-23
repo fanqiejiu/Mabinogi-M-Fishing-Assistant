@@ -120,6 +120,7 @@ class RecoveryMixin:
         cast_attempts = self._unconfirmed_cast_attempts
         recovery_attempts = self._recovery_attempts_without_success
         self._enabled.clear()
+        self._finish_fishing_session("blocking_game_prompt")
         self._reset_detection()
 
         if message_kind == "inventory_full":
@@ -145,6 +146,7 @@ class RecoveryMixin:
         attempts = self._recovery_attempts_without_success
         self._interrupt_generation += 1
         self._enabled.clear()
+        self._finish_fishing_session("recovery_limit")
         self._reset_detection()
         self._emit(
             EventKind.ERROR,

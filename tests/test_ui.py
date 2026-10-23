@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -33,6 +34,13 @@ from fishing_assistant.ui import (
     WOnlyModeWarningDialog,
 )
 from fishing_assistant.config import AppConfig
+from fishing_assistant.engine import EngineEvent, EventKind
+from fishing_assistant.automation.models import FishingResult
+from fishing_assistant.features.fishing_history.page import FishingHistoryPage
+from fishing_assistant.features.fishing_history.store import (
+    FishingHistoryStore,
+    FishingHistorySummary,
+)
 from fishing_assistant.updates import UpdateResult
 
 
@@ -66,7 +74,15 @@ class UiRegressionTests(unittest.TestCase):
         titles = [title for _eyebrow, title, _subtitle in MainWindow.PAGE_META]
         self.assertEqual(
             titles,
-            ["钓鱼控制台", "钓鱼设置", "自动制作（测试）", "识别阈值", "应用设置", "使用说明"],
+            [
+                "钓鱼控制台",
+                "钓鱼设置",
+                "自动制作（测试）",
+                "识别阈值",
+                "应用设置",
+                "使用说明",
+                "钓鱼历史",
+            ],
         )
         self.assertNotIn("背包清理（实验性）", titles)
 
@@ -140,14 +156,32 @@ class UiRegressionTests(unittest.TestCase):
             self.assertIn("14.0 秒跑鱼，会在 12.6 秒收杆", labels)
             self.assertIn("模式 2 · 定时收鱼（推荐）", labels)
             self.assertIn("模式 3 · 上钩立即收杆", labels)
+            self.assertIn("本次钓鱼记录", labels)
+            self.assertIn("证据不足的轮次会提示且不计入", labels)
         finally:
             page.close()
+
+    def test_dashboard_shows_session_fishing_counters(self) -> None:
+        owner = SimpleNamespace(_card_heading=MainWindow._card_heading)
+        card = MainWindow._build_runtime_card(owner)  # type: ignore[arg-type]
+        try:
+            self.assertEqual(owner.fishing_success_metric.value_label.text(), "0 次")
+            self.assertEqual(owner.fishing_ordinary_metric.value_label.text(), "0 次")
+            self.assertEqual(owner.fishing_failure_metric.value_label.text(), "0 次")
+            labels = "\n".join(
+                label.text() for label in card.findChildren(QLabel)
+            )
+            self.assertIn("上鱼成功", labels)
+            self.assertIn("普通成功", labels)
+            self.assertIn("失败钓鱼", labels)
+        finally:
+            card.close()
 
     def test_floating_status_bar_is_compact_topmost_and_updates(self) -> None:
         bar = FloatingStatusBar()
         try:
             self.assertLessEqual(bar.width(), 360)
-            self.assertLessEqual(bar.height(), 130)
+            self.assertLessEqual(bar.height(), 150)
             self.assertTrue(
                 bar.windowFlags() & Qt.WindowType.WindowStaysOnTopHint
             )
@@ -156,9 +190,14 @@ class UiRegressionTests(unittest.TestCase):
             )
             bar.set_calibrated(True)
             bar.set_runtime("等待上钩", "running")
+            bar.set_fishing_session_stats(3, 4, 2)
             bar.set_background_opacity(63)
             self.assertEqual(bar.calibration_label.text(), "校准 · 已完成")
             self.assertEqual(bar.runtime_label.text(), "运行 · 等待上钩")
+            self.assertEqual(
+                bar.fishing_session_label.text(),
+                "本次钓鱼 · 上鱼 3 | 普通 4 | 失败 2",
+            )
             self.assertEqual(bar.runtime_label.property("state"), "running")
             self.assertEqual(bar.background_opacity(), 63)
             bar.show()
@@ -168,6 +207,84 @@ class UiRegressionTests(unittest.TestCase):
             self.assertLessEqual(background.alpha(), 170)
         finally:
             bar.close()
+
+    def test_fishing_session_stats_update_page_and_ignore_older_sessions(self) -> None:
+        bar = FloatingStatusBar()
+        owner = SimpleNamespace(
+            _sync_floating_task_controls=lambda: None,
+            _fishing_stats_session_id=0,
+            fishing_success_metric=SimpleNamespace(value_label=QLabel("0 次")),
+            fishing_ordinary_metric=SimpleNamespace(value_label=QLabel("0 次")),
+            fishing_failure_metric=SimpleNamespace(value_label=QLabel("0 次")),
+            floating_status_bar=bar,
+        )
+        try:
+            MainWindow._consume_engine_event(
+                owner,  # type: ignore[arg-type]
+                EngineEvent(
+                    EventKind.FISHING_SESSION_STATS,
+                    "统计更新",
+                    fishing_session_id=2,
+                    successful_fishing_count=4,
+                    ordinary_fishing_count=3,
+                    failed_fishing_count=1,
+                ),
+            )
+            self.assertEqual(owner.fishing_success_metric.value_label.text(), "4 次")
+            self.assertEqual(owner.fishing_ordinary_metric.value_label.text(), "3 次")
+            self.assertEqual(owner.fishing_failure_metric.value_label.text(), "1 次")
+
+            MainWindow._consume_engine_event(
+                owner,  # type: ignore[arg-type]
+                EngineEvent(
+                    EventKind.FISHING_SESSION_STATS,
+                    "旧统计",
+                    fishing_session_id=1,
+                    successful_fishing_count=99,
+                    ordinary_fishing_count=99,
+                    failed_fishing_count=99,
+                ),
+            )
+            self.assertEqual(owner.fishing_success_metric.value_label.text(), "4 次")
+            self.assertEqual(owner.fishing_ordinary_metric.value_label.text(), "3 次")
+            self.assertEqual(owner.fishing_failure_metric.value_label.text(), "1 次")
+            self.assertIn("上鱼 4", bar.fishing_session_label.text())
+        finally:
+            bar.close()
+
+    def test_fishing_history_page_displays_saved_records_and_analysis(self) -> None:
+        store = FishingHistoryStore()
+        session_id = store.start_session()
+        store.record_result(session_id, FishingResult.CATCH)
+        store.record_result(session_id, FishingResult.ORDINARY)
+        store.record_result(session_id, FishingResult.FAILURE)
+        store.finish_session(session_id, "stopped")
+        engine = SimpleNamespace(
+            fishing_history_summary=store.summary,
+            fishing_history_sessions=store.list_sessions,
+        )
+        page = FishingHistoryPage(engine)
+        try:
+            self.assertEqual(page.session_metric.value_label.text(), "1")
+            self.assertEqual(page.round_metric.value_label.text(), "3")
+            self.assertEqual(page.success_rate_metric.value_label.text(), "66.7%")
+            self.assertEqual(page.total_duration_metric.value_label.text(), "0 秒")
+            self.assertEqual(page.table.rowCount(), 1)
+            self.assertEqual(page.table.item(0, 2).text(), "1")
+            self.assertEqual(page.table.item(0, 3).text(), "1")
+            self.assertEqual(page.table.item(0, 4).text(), "1")
+            page.set_theme("night")
+            self.assertEqual(page.table.item(0, 2).foreground().color().name(), "#75e4be")
+            self.assertEqual(page.table.item(0, 3).foreground().color().name(), "#75e4be")
+            self.assertEqual(page.table.item(0, 4).foreground().color().name(), "#ffb7a5")
+            self.assertTrue(page.table.item(0, 2).font().bold())
+            page.set_theme("day")
+            self.assertEqual(page.table.item(0, 2).foreground().color().name(), "#107450")
+            self.assertEqual(page.table.item(0, 4).foreground().color().name(), "#a23825")
+            self.assertEqual(page.table.item(0, 6).text(), "手动停止")
+        finally:
+            page.close()
+            store.close()
 
     def test_floating_status_only_shows_for_minimized_background_mode(self) -> None:
         config = SimpleNamespace(
@@ -207,6 +324,103 @@ class UiRegressionTests(unittest.TestCase):
         owner._sync_floating_status_controls.assert_called_once_with()
         owner._sync_floating_status_visibility.assert_called_once_with()
 
+    def test_topbar_floating_status_button_syncs_with_settings(self) -> None:
+        config = AppConfig(floating_status_enabled=True, voice_alerts_enabled=False)
+        engine = MagicMock()
+        engine.config.return_value = config
+        engine.is_monitoring.return_value = False
+        engine.is_crafting.return_value = False
+        engine.fishing_history_summary.return_value = FishingHistorySummary(0, 0, 0, 0, 0)
+        engine.fishing_history_sessions.return_value = []
+
+        with patch(
+            "fishing_assistant.window_target.list_target_windows",
+            return_value=[],
+        ):
+            window = MainWindow(engine)
+        try:
+            self.assertTrue(window.floating_status_button.isChecked())
+            self.assertEqual(window.floating_status_button.text(), "悬浮栏 · 开")
+            window.floating_status_button.click()
+            self.assertFalse(window.floating_status_button.isChecked())
+            self.assertFalse(window.floating_status_check.isChecked())
+            engine.update_config.assert_called_with(floating_status_enabled=False)
+        finally:
+            window.crafting_page.timer.stop()
+            window.close()
+            window.deleteLater()
+            self.app.processEvents()
+
+    def test_topbar_floating_status_button_has_theme_aware_switch_states(self) -> None:
+        engine = MagicMock()
+        engine.config.return_value = AppConfig(voice_alerts_enabled=False)
+        engine.is_monitoring.return_value = False
+        engine.is_crafting.return_value = False
+        engine.fishing_history_summary.return_value = FishingHistorySummary(0, 0, 0, 0, 0)
+        engine.fishing_history_sessions.return_value = []
+
+        with patch(
+            "fishing_assistant.window_target.list_target_windows",
+            return_value=[],
+        ):
+            window = MainWindow(engine)
+        try:
+            for theme, on_color, off_color in (
+                ("night", "#123629", "#1b293c"),
+                ("day", "#e0f7ee", "#edf2f7"),
+            ):
+                window._apply_theme(theme)
+                self.app.processEvents()
+                style = window.styleSheet().lower()
+                table = window.fishing_history_page.table
+                table.ensurePolished()
+                table_palette = table.palette()
+                expected_table_colors = (
+                    ("#0d192a", "#dde8f5", "#111d2f")
+                    if theme == "night"
+                    else ("#ffffff", "#1c304a", "#f4f8fc")
+                )
+                self.assertEqual(
+                    table_palette.color(QPalette.ColorRole.Base).name(),
+                    expected_table_colors[0],
+                )
+                self.assertEqual(
+                    table_palette.color(QPalette.ColorRole.Text).name(),
+                    expected_table_colors[1],
+                )
+                self.assertEqual(
+                    table_palette.color(QPalette.ColorRole.AlternateBase).name(),
+                    expected_table_colors[2],
+                )
+                self.assertEqual(table.objectName(), "fishingHistoryTable")
+                self.assertEqual(
+                    table.verticalHeader().objectName(),
+                    "fishingHistoryRowHeader",
+                )
+                self.assertIn(
+                    "qpushbutton#floatingstatusbutton:checked", style
+                )
+                self.assertIn(
+                    "qtablewidget#fishinghistorytable qheaderview::section",
+                    style,
+                )
+                self.assertIn(
+                    "qheaderview#fishinghistoryrowheader::section",
+                    style,
+                )
+                self.assertIn("qtablecornerbutton::section", style)
+                self.assertIn(on_color, style)
+                self.assertIn(off_color, style)
+                window.floating_status_button.setChecked(True)
+                self.assertTrue(window.floating_status_button.isChecked())
+                window.floating_status_button.setChecked(False)
+                self.assertFalse(window.floating_status_button.isChecked())
+        finally:
+            window.crafting_page.timer.stop()
+            window.close()
+            window.deleteLater()
+            self.app.processEvents()
+
     def test_floating_background_opacity_is_saved_and_previewed(self) -> None:
         owner = SimpleNamespace(
             engine=MagicMock(),
@@ -238,6 +452,8 @@ class UiRegressionTests(unittest.TestCase):
 
         engine.update_config.side_effect = update_config
         engine.is_monitoring.return_value = False
+        engine.fishing_history_summary.return_value = FishingHistorySummary(0, 0, 0, 0, 0)
+        engine.fishing_history_sessions.return_value = []
         with patch(
             "fishing_assistant.window_target.list_target_windows",
             return_value=[],

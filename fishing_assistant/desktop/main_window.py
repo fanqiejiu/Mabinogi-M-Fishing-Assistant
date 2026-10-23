@@ -32,6 +32,7 @@ from fishing_assistant.desktop.pages.settings import SettingsPageMixin
 from fishing_assistant.desktop.pages.thresholds import ThresholdPageMixin
 from fishing_assistant.desktop.styles import DAY_STYLE, NIGHT_STYLE
 from fishing_assistant.engine import EventKind, FishingEngine
+from fishing_assistant.features.fishing_history.page import FishingHistoryPage
 from fishing_assistant.voice_alerts import (
     VoiceAlertPlayer,
     WINDOW_MINIMIZED_CUE,
@@ -64,6 +65,7 @@ class MainWindow(
         ("DETECTION · TUNING", "识别阈值", "调整图标识别方式、区域和兼容模式阈值。"),
         ("APPLICATION · SETTINGS", "应用设置", "管理更新检查与本地诊断日志。"),
         ("GUIDE · HOTKEYS", "使用说明", "查看校准流程和全局快捷键。"),
+        ("FISHING · HISTORY", "钓鱼历史", "查看会话记录与累计统计。"),
     )
 
     engine_event = Signal(object)
@@ -86,6 +88,7 @@ class MainWindow(
         self._last_snapshot_path: Path | None = None
         self._last_snapshot_bundle: Path | None = None
         self._floating_crafting_session = False
+        self._fishing_stats_session_id = 0
         self.floating_status_bar = FloatingStatusBar()
         self.floating_status_bar.pause_requested.connect(self._pause_from_floating)
         self.floating_status_bar.resume_requested.connect(self._resume_from_floating)
@@ -93,8 +96,8 @@ class MainWindow(
         self.setWindowTitle(APP_NAME)
         if APP_ICON_PATH.exists():
             self.setWindowIcon(QIcon(str(APP_ICON_PATH)))
-        self.setMinimumSize(920, 680)
-        self.resize(980, 760)
+        self.setMinimumSize(1080, 680)
+        self.resize(1080, 760)
         # 页面构建时就会 polish 控件。先用保存的主题，避免首帧缓存夜间颜色。
         self.setStyleSheet(DAY_STYLE if self.engine.config().ui_theme == "day" else NIGHT_STYLE)
 
@@ -132,6 +135,8 @@ class MainWindow(
         self.stack.addWidget(self._build_threshold_page())
         self.stack.addWidget(self._build_settings_page())
         self.stack.addWidget(self._build_help_page())
+        self.fishing_history_page = FishingHistoryPage(self.engine)
+        self.stack.addWidget(self.fishing_history_page)
         content_layout.addWidget(self.stack, 1)
         root_layout.addWidget(content, 1)
         self.setCentralWidget(root)
@@ -185,6 +190,7 @@ class MainWindow(
         layout.addWidget(application_label)
         layout.addWidget(self._nav_button("设置", 4))
         layout.addWidget(self._nav_button("使用说明", 5))
+        layout.addWidget(self._nav_button("钓鱼历史", 6))
         layout.addSpacing(14)
 
         footer = QLabel(f"v{APP_VERSION}  ·  {APP_AUTHOR}")
@@ -229,6 +235,11 @@ class MainWindow(
         self.runtime_state_chip.setProperty("state", "idle")
         self.runtime_state_chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.runtime_state_chip, 0, Qt.AlignmentFlag.AlignTop)
+        self.floating_status_button = QPushButton()
+        self.floating_status_button.setObjectName("floatingStatusButton")
+        self.floating_status_button.setCheckable(True)
+        self.floating_status_button.setToolTip("切换最小化后的悬浮状态栏")
+        layout.addWidget(self.floating_status_button, 0, Qt.AlignmentFlag.AlignTop)
         self.theme_button = QPushButton()
         self.theme_button.setToolTip("切换日间 / 夜间界面")
         layout.addWidget(self.theme_button, 0, Qt.AlignmentFlag.AlignTop)
@@ -238,6 +249,7 @@ class MainWindow(
         self.status_chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
         for control in (
             self.runtime_state_chip,
+            self.floating_status_button,
             self.theme_button,
             self.status_chip,
         ):
